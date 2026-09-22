@@ -4,6 +4,7 @@ use rand_core::OsRng;
 use crate::{
     commitment::{Commitment, Opening},
     params::PublicParams,
+    transcript::Challenge,
 };
 
 pub struct VVerProof {
@@ -39,8 +40,54 @@ pub fn check(
     let u = c.0 - v_pub * pp.g_val;
     let lhs = proof.z_iden * pp.g_iden + proof.z_ran * pp.g_ran;
     let rhs = proof.t + beta * u;
-    
+
     lhs == rhs
+}
+
+// Fiat-Shamir challenge for Pi.VVer: beta = H(ds, pp, c, v', ctx, t).
+// v' MUST be bound in: the verified element c - v'*g_val moves when v' moves,
+// so a proof for one value could otherwise be claimed for another.
+fn challenge(
+    pp: &PublicParams,
+    c: &Commitment,
+    v_pub: &Scalar,
+    ctx: &[u8],
+    t: &RistrettoPoint,
+) -> Scalar {
+    Challenge::new(b"IBC/v1/VVer", pp)
+        .point(b"c", &c.0)
+        .scalar(b"v", v_pub)
+        .bytes(b"ctx", ctx)
+        .point(b"t", t)
+        .finish()
+}
+
+impl VVerProof {
+    // Non-interactive prove
+    pub fn prove(
+        pp: &PublicParams,
+        c: &Commitment,
+        v_pub: Scalar,
+        o: &Opening,
+        ctx: &[u8],
+    ) -> Self {
+        let (masks, t) = commit(pp);
+        let beta = challenge(pp, c, &v_pub, ctx, &t);
+        let (z_iden, z_ran) = respond(masks, beta, o);
+        VVerProof { t, z_iden, z_ran }
+    }
+
+    // Non-interactive verify
+    pub fn verify(
+        &self,
+        pp: &PublicParams,
+        c: &Commitment,
+        v_pub: Scalar,
+        ctx: &[u8],
+    ) -> bool {
+        let beta = challenge(pp, c, &v_pub, ctx, &self.t);
+        check(pp, c, v_pub, self, beta)
+    }
 }
 
 #[cfg(test)]
@@ -141,7 +188,6 @@ mod tests {
         let pp = PublicParams::setup();
         let v = value_to_scalar(1_500);
         let o = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
-        let c = commit_to(&pp, &o);
 
         let (masks, t) = commit(&pp);
         let beta = Scalar::random(&mut OsRng);
@@ -175,5 +221,82 @@ mod tests {
 
         assert_eq!(id_star, o.id);
         assert_eq!(r_star, o.blinding);
+    }
+
+    #[test]
+    fn ni_proof_verifies() {
+        let pp = PublicParams::setup();
+        let v = value_to_scalar(1_500);
+        let o = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
+        let c = commit_to(&pp, &o);
+
+        let proof = VVerProof::prove(&pp, &c, v, &o, b"tx-001");
+        assert!(proof.verify(&pp, &c, v, b"tx-001"));
+    }
+
+    #[test]
+    fn vver_proof_is_bound_to_the_claimed_value() {
+        // Prove for v'. Verify against v'+1. Must fail.
+        let pp = PublicParams::setup();
+        let v = value_to_scalar(1_500);
+        let o = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
+        let c = commit_to(&pp, &o);
+
+        let proof = VVerProof::prove(&pp, &c, v, &o, b"tx-001");
+        assert!(!proof.verify(&pp, &c, value_to_scalar(1_501), b"tx-001"));
+    }
+
+    #[test]
+    fn proof_is_bound_to_the_context() {
+        // Prove with ctx = tx-001. Verify with ctx = tx-002. Must fail.
+        let pp = PublicParams::setup();
+        let v = value_to_scalar(1_500);
+        let o = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
+        let c = commit_to(&pp, &o);
+
+        let proof = VVerProof::prove(&pp, &c, v, &o, b"tx-001");
+        assert!(!proof.verify(&pp, &c, v, b"tx-002"));
+    }
+
+    #[test]
+    fn proof_is_bound_to_the_statement() {
+        // Prove for c. Verify against a different commitment. Must fail.
+        let pp = PublicParams::setup();
+        let v = value_to_scalar(1_500);
+        let o = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
+        let c = commit_to(&pp, &o);
+
+        let proof = VVerProof::prove(&pp, &c, v, &o, b"tx-001");
+
+        let other = Opening { id: hash_identity(b"bob"), val: v, blinding: random_blinding() };
+        let c_other = commit_to(&pp, &other);
+        assert!(!proof.verify(&pp, &c_other, v, b"tx-001"));
+    }
+
+    #[test]
+    fn fiat_shamir_equals_the_interactive_protocol() {
+        // A non-interactive proof, fed to the interactive check() at the
+        // recomputed beta, must pass: the two forms are the same protocol.
+        let pp = PublicParams::setup();
+        let v = value_to_scalar(1_500);
+        let o = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
+        let c = commit_to(&pp, &o);
+
+        let proof = VVerProof::prove(&pp, &c, v, &o, b"tx-001");
+        let beta = challenge(&pp, &c, &v, b"tx-001", &proof.t);
+        assert!(check(&pp, &c, v, &proof, beta));
+    }
+
+    #[test]
+    fn two_proofs_for_the_same_statement_differ() {
+        // Fresh masks each time, so proofs are randomised.
+        let pp = PublicParams::setup();
+        let v = value_to_scalar(1_500);
+        let o = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
+        let c = commit_to(&pp, &o);
+
+        let p1 = VVerProof::prove(&pp, &c, v, &o, b"tx-001");
+        let p2 = VVerProof::prove(&pp, &c, v, &o, b"tx-001");
+        assert_ne!(p1.t, p2.t);
     }
 }
