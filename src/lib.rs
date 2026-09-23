@@ -4,3 +4,4 @@ pub mod schnorr;
 pub mod ideq;
 pub mod vver;
 pub mod transcript;
+pub mod sigma;

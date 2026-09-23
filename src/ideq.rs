@@ -3,6 +3,7 @@ use rand_core::OsRng;
 
 use crate::commitment::{Commitment, Opening};
 use crate::params::PublicParams;
+use crate::sigma::{self, SigmaProof};
 use crate::transcript::Challenge;
 
 pub struct IdEqProof {
@@ -46,25 +47,28 @@ pub fn check(
     lhs == rhs
 }
 
-// Fiat-Shamir challenge for Pi.IDEq: beta = H(ds, pp, c0, c1, ctx, t).
-// Built here (not caller-supplied) so beta is a pure function of the public inputs.
-fn challenge(
+const DS: &[u8] = b"IBC/v1/IDEq";
+
+fn bind<'a>(
+    c0: &'a Commitment,
+    c1: &'a Commitment,
+    ctx: &'a [u8],
+) -> impl FnOnce(Challenge) -> Challenge + 'a {
+    move |ch| ch.point(b"c0", &c0.0).point(b"c1", &c1.0).bytes(b"ctx", ctx)
+}
+
+pub fn challenge(
     pp: &PublicParams,
     c0: &Commitment,
     c1: &Commitment,
     ctx: &[u8],
     t: &RistrettoPoint,
 ) -> Scalar {
-    Challenge::new(b"IBC/v1/IDEq", pp)
-        .point(b"c0", &c0.0)
-        .point(b"c1", &c1.0)
-        .bytes(b"ctx", ctx)
-        .point(b"t", t)
-        .finish()
+    bind(c0, c1, ctx)(Challenge::new(DS, pp)).point(b"t", t).finish()
 }
 
 impl IdEqProof {
-    // Non-interactive prove
+    // Non-interactive prove, via the Sigma engine.
     pub fn prove(
         pp: &PublicParams,
         c0: &Commitment,
@@ -73,13 +77,17 @@ impl IdEqProof {
         o1: &Opening,
         ctx: &[u8],
     ) -> Self {
-        let (masks, t) = commit(pp);
-        let beta = challenge(pp, c0, c1, ctx, &t);
-        let (z_val, z_ran) = respond(masks, beta, o0, o1);
-        IdEqProof { t, z_val, z_ran }
+        let sp = sigma::prove(
+            pp,
+            DS,
+            &[pp.g_val, pp.g_ran],
+            &[o0.val - o1.val, o0.blinding - o1.blinding],
+            bind(c0, c1, ctx),
+        );
+        IdEqProof { t: sp.t, z_val: sp.z[0], z_ran: sp.z[1] }
     }
 
-    // Non-interactive verify
+    // Non-interactive verify, via the Sigma engine.
     pub fn verify(
         &self,
         pp: &PublicParams,
@@ -87,8 +95,8 @@ impl IdEqProof {
         c1: &Commitment,
         ctx: &[u8],
     ) -> bool {
-        let beta = challenge(pp, c0, c1, ctx, &self.t);
-        check(pp, c0, c1, self, beta)
+        let sp = SigmaProof { t: self.t, z: vec![self.z_val, self.z_ran] };
+        sigma::verify(pp, DS, &[pp.g_val, pp.g_ran], &(c0.0 - c1.0), &sp, bind(c0, c1, ctx))
     }
 }
 

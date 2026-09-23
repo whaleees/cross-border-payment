@@ -4,6 +4,7 @@ use rand_core::OsRng;
 use crate::{
     commitment::{Commitment, Opening},
     params::PublicParams,
+    sigma::{self, SigmaProof},
     transcript::Challenge,
 };
 
@@ -44,26 +45,28 @@ pub fn check(
     lhs == rhs
 }
 
-// Fiat-Shamir challenge for Pi.VVer: beta = H(ds, pp, c, v', ctx, t).
-// v' MUST be bound in: the verified element c - v'*g_val moves when v' moves,
-// so a proof for one value could otherwise be claimed for another.
-fn challenge(
+const DS: &[u8] = b"IBC/v1/VVer";
+
+fn bind<'a>(
+    c: &'a Commitment,
+    v_pub: Scalar,
+    ctx: &'a [u8],
+) -> impl FnOnce(Challenge) -> Challenge + 'a {
+    move |ch| ch.point(b"c", &c.0).scalar(b"v", &v_pub).bytes(b"ctx", ctx)
+}
+
+pub fn challenge(
     pp: &PublicParams,
     c: &Commitment,
     v_pub: &Scalar,
     ctx: &[u8],
     t: &RistrettoPoint,
 ) -> Scalar {
-    Challenge::new(b"IBC/v1/VVer", pp)
-        .point(b"c", &c.0)
-        .scalar(b"v", v_pub)
-        .bytes(b"ctx", ctx)
-        .point(b"t", t)
-        .finish()
+    bind(c, *v_pub, ctx)(Challenge::new(DS, pp)).point(b"t", t).finish()
 }
 
 impl VVerProof {
-    // Non-interactive prove
+    // Non-interactive prove, via the Sigma engine.
     pub fn prove(
         pp: &PublicParams,
         c: &Commitment,
@@ -71,13 +74,17 @@ impl VVerProof {
         o: &Opening,
         ctx: &[u8],
     ) -> Self {
-        let (masks, t) = commit(pp);
-        let beta = challenge(pp, c, &v_pub, ctx, &t);
-        let (z_iden, z_ran) = respond(masks, beta, o);
-        VVerProof { t, z_iden, z_ran }
+        let sp = sigma::prove(
+            pp,
+            DS,
+            &[pp.g_iden, pp.g_ran],
+            &[o.id, o.blinding],
+            bind(c, v_pub, ctx),
+        );
+        VVerProof { t: sp.t, z_iden: sp.z[0], z_ran: sp.z[1] }
     }
 
-    // Non-interactive verify
+    // Non-interactive verify, via the Sigma engine.
     pub fn verify(
         &self,
         pp: &PublicParams,
@@ -85,8 +92,9 @@ impl VVerProof {
         v_pub: Scalar,
         ctx: &[u8],
     ) -> bool {
-        let beta = challenge(pp, c, &v_pub, ctx, &self.t);
-        check(pp, c, v_pub, self, beta)
+        let sp = SigmaProof { t: self.t, z: vec![self.z_iden, self.z_ran] };
+        let u = c.0 - v_pub * pp.g_val;
+        sigma::verify(pp, DS, &[pp.g_iden, pp.g_ran], &u, &sp, bind(c, v_pub, ctx))
     }
 }
 
