@@ -5,3 +5,6 @@ pub mod ideq;
 pub mod vver;
 pub mod transcript;
 pub mod sigma;
+pub mod veq;
+pub mod fulleq;
+pub mod txver;
