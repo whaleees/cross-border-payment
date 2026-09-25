@@ -5,6 +5,7 @@ use curve25519_dalek::{
 use rand_core::OsRng;
 
 use crate::commitment::{Commitment, Opening};
+use crate::encoding;
 use crate::params::PublicParams;
 use crate::transcript::Challenge;
 
@@ -112,6 +113,16 @@ impl TxVerProof {
         let points = [pp.g_iden, pp.g_val, pp.g_ran, self.t1, self.t2, c_ref.0, c_tx.0];
 
         RistrettoPoint::vartime_multiscalar_mul(scalars, points) == RistrettoPoint::identity()
+    }
+
+    // Spec order: (t1, t2, z_val, z_1, z_iden, z_2).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        encoding::encode(&[self.t1, self.t2], &[self.z_val, self.z_1, self.z_iden, self.z_2])
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (t, z) = encoding::decode(bytes, 2, 4)?;
+        Some(TxVerProof { t1: t[0], t2: t[1], z_val: z[0], z_1: z[1], z_iden: z[2], z_2: z[3] })
     }
 }
 
@@ -331,15 +342,11 @@ mod tests {
 
     #[test]
     fn proof_size_is_192_bytes() {
-        // 2 points + 4 scalars = 192 bytes.
+        // Measured on the real encoding, then decoded and verified.
         let (pp, c_ref, c_tx, o_ref, o_tx, v) = valid_tx(1_500);
-        let p = TxVerProof::prove(&pp, &c_ref, &c_tx, v, &o_ref, &o_tx, b"tx-001");
-        let size = p.t1.compress().to_bytes().len()
-            + p.t2.compress().to_bytes().len()
-            + p.z_val.as_bytes().len()
-            + p.z_1.as_bytes().len()
-            + p.z_iden.as_bytes().len()
-            + p.z_2.as_bytes().len();
-        assert_eq!(size, 192);
+        let bytes = TxVerProof::prove(&pp, &c_ref, &c_tx, v, &o_ref, &o_tx, b"tx-001").to_bytes();
+        assert_eq!(bytes.len(), 192);
+        let decoded = TxVerProof::from_bytes(&bytes).expect("valid encoding");
+        assert!(decoded.verify(&pp, &c_ref, &c_tx, v, b"tx-001"));
     }
 }

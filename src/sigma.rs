@@ -1,6 +1,7 @@
 use curve25519_dalek::{RistrettoPoint, Scalar, traits::Identity};
 use rand_core::OsRng;
 
+use crate::encoding;
 use crate::params::PublicParams;
 use crate::transcript::Challenge;
 
@@ -8,6 +9,18 @@ use crate::transcript::Challenge;
 pub struct SigmaProof {
     pub t: RistrettoPoint,
     pub z: Vec<Scalar>,
+}
+
+impl SigmaProof {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        encoding::encode(&[self.t], &self.z)
+    }
+
+    // One point, then exactly `n_responses` scalars, or None.
+    pub fn from_bytes(bytes: &[u8], n_responses: usize) -> Option<Self> {
+        let (t, z) = encoding::decode(bytes, 1, n_responses)?;
+        Some(SigmaProof { t: t[0], z })
+    }
 }
 
 fn linear_combination(scalars: &[Scalar], points: &[RistrettoPoint]) -> RistrettoPoint {

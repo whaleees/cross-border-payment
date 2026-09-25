@@ -65,6 +65,14 @@ impl MIDEqProof {
         let d = target_d(pp, commits, ctx);
         sigma::verify(pp, DS, &[pp.g_val, pp.g_ran], &d, &self.0, bind(commits, ctx))
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.0.to_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        SigmaProof::from_bytes(bytes, 2).map(MIDEqProof)
+    }
 }
 
 #[cfg(test)]
@@ -123,17 +131,16 @@ mod tests {
 
     #[test]
     fn proof_is_constant_size() {
+        // 96 bytes of real encoding for n = 2 and n = 100, decoded and verified.
         let pp = PublicParams::setup();
-        let small: Vec<&[u8]> = vec![b"alice", b"alice"];
-        let (cs2, os2) = commitments(&pp, &small);
-        let p2 = MIDEqProof::prove(&pp, &cs2, &os2, b"b");
-
-        let big_labels: Vec<&[u8]> = (0..100).map(|_| b"alice" as &[u8]).collect();
-        let (cs100, os100) = commitments(&pp, &big_labels);
-        let p100 = MIDEqProof::prove(&pp, &cs100, &os100, b"b");
-
-        assert_eq!(p2.0.z.len(), 2);
-        assert_eq!(p100.0.z.len(), 2); // 96 bytes regardless of n
+        for n in [2, 100] {
+            let labels: Vec<&[u8]> = vec![b"alice" as &[u8]; n];
+            let (cs, os) = commitments(&pp, &labels);
+            let bytes = MIDEqProof::prove(&pp, &cs, &os, b"b").to_bytes();
+            assert_eq!(bytes.len(), 96, "n = {n}");
+            let decoded = MIDEqProof::from_bytes(&bytes).expect("valid encoding");
+            assert!(decoded.verify(&pp, &cs, b"b"));
+        }
     }
 
     #[test]

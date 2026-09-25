@@ -43,6 +43,14 @@ impl FullEqProof {
     ) -> bool {
         sigma::verify(pp, DS, &[pp.g_ran], &(c0.0 - c1.0), &self.0, bind(c0, c1, ctx))
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.0.to_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        SigmaProof::from_bytes(bytes, 1).map(FullEqProof)
+    }
 }
 
 #[cfg(test)]
@@ -123,11 +131,11 @@ mod tests {
 
     #[test]
     fn proof_size_is_64_bytes() {
-        // One point (t) + one scalar (z) = 64 bytes.
+        // Measured on the real encoding, then decoded and verified.
         let (pp, o0, o1, c0, c1) = rerandomised_pair();
-        let proof = FullEqProof::prove(&pp, &c0, &c1, &o0, &o1, b"tx-001");
-        assert_eq!(proof.0.z.len(), 1);
-        let size = proof.0.t.compress().to_bytes().len() + proof.0.z[0].as_bytes().len();
-        assert_eq!(size, 64);
+        let bytes = FullEqProof::prove(&pp, &c0, &c1, &o0, &o1, b"tx-001").to_bytes();
+        assert_eq!(bytes.len(), 64);
+        let decoded = FullEqProof::from_bytes(&bytes).expect("valid encoding");
+        assert!(decoded.verify(&pp, &c0, &c1, b"tx-001"));
     }
 }

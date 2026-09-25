@@ -3,6 +3,7 @@ use rand_core::OsRng;
 
 use crate::{
     commitment::{Commitment, Opening},
+    encoding,
     params::PublicParams,
     sigma::{self, SigmaProof},
     transcript::Challenge,
@@ -95,6 +96,15 @@ impl VVerProof {
         let sp = SigmaProof { t: self.t, z: vec![self.z_iden, self.z_ran] };
         let u = c.0 - v_pub * pp.g_val;
         sigma::verify(pp, DS, &[pp.g_iden, pp.g_ran], &u, &sp, bind(c, v_pub, ctx))
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        encoding::encode(&[self.t], &[self.z_iden, self.z_ran])
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (t, z) = encoding::decode(bytes, 1, 2)?;
+        Some(VVerProof { t: t[0], z_iden: z[0], z_ran: z[1] })
     }
 }
 
@@ -306,5 +316,19 @@ mod tests {
         let p1 = VVerProof::prove(&pp, &c, v, &o, b"tx-001");
         let p2 = VVerProof::prove(&pp, &c, v, &o, b"tx-001");
         assert_ne!(p1.t, p2.t);
+    }
+
+    #[test]
+    fn proof_size_is_96_bytes() {
+        // Measured on the real encoding, then decoded and verified.
+        let pp = PublicParams::setup();
+        let v = value_to_scalar(1_500);
+        let o = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
+        let c = commit_to(&pp, &o);
+
+        let bytes = VVerProof::prove(&pp, &c, v, &o, b"tx-001").to_bytes();
+        assert_eq!(bytes.len(), 96);
+        let decoded = VVerProof::from_bytes(&bytes).expect("valid encoding");
+        assert!(decoded.verify(&pp, &c, v, b"tx-001"));
     }
 }

@@ -51,6 +51,14 @@ impl VEqProof {
             bind(c0, c1, ctx),
         )
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.0.to_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        SigmaProof::from_bytes(bytes, 2).map(VEqProof)
+    }
 }
 
 #[cfg(test)]
@@ -167,5 +175,21 @@ mod tests {
         let p1 = VEqProof::prove(&pp, &c0, &c1, &o0, &o1, b"tx-001");
         let p2 = VEqProof::prove(&pp, &c0, &c1, &o0, &o1, b"tx-001");
         assert_ne!(p1.0.t, p2.0.t);
+    }
+
+    #[test]
+    fn proof_size_is_96_bytes() {
+        // Measured on the real encoding, then decoded and verified.
+        let pp = PublicParams::setup();
+        let v = value_to_scalar(500);
+        let o0 = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
+        let o1 = Opening { id: hash_identity(b"bob"),   val: v, blinding: random_blinding() };
+        let c0 = commit(&pp, &o0);
+        let c1 = commit(&pp, &o1);
+
+        let bytes = VEqProof::prove(&pp, &c0, &c1, &o0, &o1, b"tx-001").to_bytes();
+        assert_eq!(bytes.len(), 96);
+        let decoded = VEqProof::from_bytes(&bytes).expect("valid encoding");
+        assert!(decoded.verify(&pp, &c0, &c1, b"tx-001"));
     }
 }
