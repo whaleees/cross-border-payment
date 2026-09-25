@@ -8,3 +8,4 @@ pub mod sigma;
 pub mod veq;
 pub mod fulleq;
 pub mod txver;
+pub mod mideq;
