@@ -3,7 +3,7 @@ use merlin::Transcript;
 
 use crate::params::PublicParams;
 
-// Builds a challenge from a labelled sequence of public values
+#[derive(Clone)]
 pub struct Challenge(Transcript);
 
 impl Challenge {
@@ -39,6 +39,13 @@ impl Challenge {
     {
         let mut buf = [0u8; 64];
         self.0.challenge_bytes(b"beta", &mut buf);
+        Scalar::from_bytes_mod_order_wide(&buf)
+    }
+
+    pub fn challenge_scalar(&mut self, label: &'static [u8]) -> Scalar
+    {
+        let mut buf = [0u8; 64];
+        self.0.challenge_bytes(label, &mut buf);
         Scalar::from_bytes_mod_order_wide(&buf)
     }
 }
