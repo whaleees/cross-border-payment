@@ -10,10 +10,12 @@ impl Challenge {
     // Start a transcript
     pub fn new(domain: &'static [u8], pp: &PublicParams) -> Self
     {
+        // Bytes compressed once at setup, not on every challenge.
+        let [g_iden, g_val, g_ran] = pp.to_bytes();
         let mut tr = Transcript::new(domain);
-        tr.append_message(b"g_iden", pp.g_iden.compress().as_bytes());
-        tr.append_message(b"g_val", pp.g_val.compress().as_bytes());
-        tr.append_message(b"g_ran", pp.g_ran.compress().as_bytes());
+        tr.append_message(b"g_iden", &g_iden);
+        tr.append_message(b"g_val", &g_val);
+        tr.append_message(b"g_ran", &g_ran);
         Challenge(tr)
     }
 
@@ -47,5 +49,20 @@ impl Challenge {
         let mut buf = [0u8; 64];
         self.0.challenge_bytes(label, &mut buf);
         Scalar::from_bytes_mod_order_wide(&buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn challenges_are_unchanged_by_the_cached_generator_bytes() {
+        let pp = PublicParams::setup();
+        let mut old = Transcript::new(b"test");
+        old.append_message(b"g_iden", pp.g_iden.compress().as_bytes());
+        old.append_message(b"g_val", pp.g_val.compress().as_bytes());
+        old.append_message(b"g_ran", pp.g_ran.compress().as_bytes());
+        assert_eq!(Challenge::new(b"test", &pp).finish(), Challenge(old).finish());
     }
 }

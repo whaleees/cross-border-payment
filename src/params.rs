@@ -15,6 +15,7 @@ pub struct PublicParams {
     pub g_iden: RistrettoPoint, // carries identity
     pub g_val: RistrettoPoint,  // carries val
     pub g_ran: RistrettoPoint,  // carries blinding
+    bytes: [[u8; 32]; 3],       // the three compressed once, for every transcript
 }
 
 impl PublicParams {
@@ -32,15 +33,16 @@ impl PublicParams {
         assert!(g_val  != g_ran,   "g_val and g_ran coincide");
         assert!(g_iden != g_ran,   "g_iden and g_ran coincide");
 
-        PublicParams { g_iden, g_val, g_ran }
+        let bytes = [
+            g_iden.compress().to_bytes(),
+            g_val.compress().to_bytes(),
+            g_ran.compress().to_bytes(),
+        ];
+        PublicParams { g_iden, g_val, g_ran, bytes }
     }
 
     pub fn to_bytes(&self) -> [[u8; 32]; 3] {
-        [
-            self.g_iden.compress().to_bytes(),
-            self.g_val.compress().to_bytes(),
-            self.g_ran.compress().to_bytes(),
-        ]
+        self.bytes
     }
 }
 
@@ -88,6 +90,19 @@ mod tests {
             let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
             println!("{name} = {hex}");
         }
+    }
+
+    #[test]
+    fn generators_match_the_test_vectors() {
+        let hex = |b: [u8; 32]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let pp = PublicParams::setup();
+        let [g_iden, g_val, g_ran] = pp.to_bytes();
+        assert_eq!(hex(g_iden), "d47874bc8ca4f558116fa93fbb51474c6c39d165f423f7b54625e5b071321201");
+        assert_eq!(hex(g_val), "daabecbf093fc1ec0e2b40f600b84736df9519276cb431697652bc872c9e525f");
+        assert_eq!(hex(g_ran), "7a2cd623b6bdf05f52998960fe69d6d94d860cdc519e9a857ed725fa49116a73");
+        assert_eq!(g_iden, pp.g_iden.compress().to_bytes());
+        assert_eq!(g_val, pp.g_val.compress().to_bytes());
+        assert_eq!(g_ran, pp.g_ran.compress().to_bytes());
     }
 
     #[test]
