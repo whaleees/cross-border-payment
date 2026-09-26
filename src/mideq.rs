@@ -1,4 +1,4 @@
-use curve25519_dalek::{RistrettoPoint, Scalar, traits::VartimeMultiscalarMul};
+use curve25519_dalek::{RistrettoPoint, Scalar};
 
 use crate::commitment::{Commitment, Opening};
 use crate::params::PublicParams;
@@ -20,12 +20,15 @@ fn gammas(pp: &PublicParams, commits: &[Commitment], ctx: &[u8]) -> Vec<Scalar> 
         .collect()
 }
 
-fn target_d(pp: &PublicParams, commits: &[Commitment], ctx: &[u8]) -> RistrettoPoint {
+// D = sum_{i>=2} gamma_i*(c1 - ci) = (sum gamma_i)*c1 - sum gamma_i*ci, kept as n
+// terms so the engine folds it into its single MSM: the spec's one MSM of n + 3
+// bases (g_val, g_ran, t, c1..cn).
+fn target_d(pp: &PublicParams, commits: &[Commitment], ctx: &[u8]) -> Vec<(Scalar, RistrettoPoint)> {
     let g = gammas(pp, commits, ctx);
-    let mut scalars = Vec::with_capacity(commits.len());
-    scalars.push(g.iter().sum::<Scalar>()); // c1
-    scalars.extend(g.iter().map(|gi| -gi)); // c2..cn
-    RistrettoPoint::vartime_multiscalar_mul(scalars, commits.iter().map(|c| c.0))
+    let mut terms = Vec::with_capacity(commits.len());
+    terms.push((g.iter().sum::<Scalar>(), commits[0].0)); // c1
+    terms.extend(g.iter().zip(&commits[1..]).map(|(gi, ci)| (-gi, ci.0))); // c2..cn
+    terms
 }
 
 // The main challenge binds all commitments + ctx (the engine appends t).
@@ -63,7 +66,7 @@ impl MIDEqProof {
             return false;
         }
         let d = target_d(pp, commits, ctx);
-        sigma::verify(pp, DS, &[pp.g_val, pp.g_ran], &d, &self.0, bind(commits, ctx))
+        sigma::verify_terms(pp, DS, &[pp.g_val, pp.g_ran], &d, &self.0, bind(commits, ctx))
     }
 }
 

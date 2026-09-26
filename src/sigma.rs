@@ -1,4 +1,7 @@
-use curve25519_dalek::{RistrettoPoint, Scalar, traits::Identity};
+use curve25519_dalek::{
+    RistrettoPoint, Scalar,
+    traits::{Identity, VartimeMultiscalarMul},
+};
 use rand_core::OsRng;
 
 use crate::params::PublicParams;
@@ -49,11 +52,25 @@ pub fn prove(
     SigmaProof { t, z }
 }
 
+// Verify, with the target U already evaluated to one point.
 pub fn verify(
     pp: &PublicParams,
     domain: &'static [u8],
     bases: &[RistrettoPoint],
     u: &RistrettoPoint,
+    proof: &SigmaProof,
+    bind: impl FnOnce(Challenge) -> Challenge,
+) -> bool {
+    verify_terms(pp, domain, bases, &[(Scalar::ONE, *u)], proof, bind)
+}
+
+// Verify, with the target handed over unevaluated as terms: U = sum_k s_k * P_k.
+// Use this when building U would cost a scalar multiplication (Pi.VVer's v'*g_val, Pi.MIDEq's D): the terms fold into the check's single MSM instead.
+pub fn verify_terms(
+    pp: &PublicParams,
+    domain: &'static [u8],
+    bases: &[RistrettoPoint],
+    u: &[(Scalar, RistrettoPoint)],
     proof: &SigmaProof,
     bind: impl FnOnce(Challenge) -> Challenge,
 ) -> bool {
@@ -65,9 +82,12 @@ pub fn verify(
         .point(b"t", &proof.t)
         .finish();
 
-    let lhs = linear_combination(&proof.z, bases);
-    let rhs = proof.t + beta * u;
-    lhs == rhs
+    // sum_i z_i*B_i == t + beta*U, rearranged to  sum_i z_i*B_i - beta*U == t  and
+    // computed as ONE multi-scalar multiplication. Variable-time is safe here:
+    // every input to the verifier is public.
+    let scalars = proof.z.iter().copied().chain(u.iter().map(|(s, _)| -(beta * s)));
+    let points = bases.iter().copied().chain(u.iter().map(|(_, p)| *p));
+    RistrettoPoint::vartime_multiscalar_mul(scalars, points) == proof.t
 }
 
 #[cfg(test)]
@@ -139,6 +159,54 @@ mod tests {
 
         proof.z.pop(); // now one response for two bases
         assert!(!verify(&pp, b"test/2base", &bases, &u, &proof, |ch| ch.point(b"u", &u)));
+    }
+
+    #[test]
+    fn msm_check_agrees_with_the_textbook_equation() {
+        // verify() checks  sum z_i*B_i - beta*U == t  as one MSM. Recompute the
+        // textbook form  sum z_i*B_i == t + beta*U  by hand, for an honest proof and
+        // for tampered ones, and demand the same verdict every time.
+        let pp = PublicParams::setup();
+        let bases = [pp.g_iden, pp.g_ran];
+        let w = [value_to_scalar(7), value_to_scalar(9)];
+        let u = two_base_stmt(&pp, w[0], w[1]);
+        let bind = |ch: Challenge| ch.point(b"u", &u);
+
+        let honest = prove(&pp, b"test/2base", &bases, &w, bind);
+        let mut bad_z = honest.clone();
+        bad_z.z[0] += Scalar::ONE;
+        let mut bad_t = honest.clone();
+        bad_t.t += pp.g_val;
+
+        for (proof, expected) in [(&honest, true), (&bad_z, false), (&bad_t, false)] {
+            let beta = bind(Challenge::new(b"test/2base", &pp)).point(b"t", &proof.t).finish();
+            let textbook = linear_combination(&proof.z, &bases) == proof.t + beta * u;
+            assert_eq!(textbook, expected);
+            assert_eq!(verify(&pp, b"test/2base", &bases, &u, proof, bind), textbook);
+        }
+    }
+
+    #[test]
+    fn target_as_terms_matches_the_evaluated_target() {
+        // verify_terms takes U unevaluated -- Pi.VVer's U = c - v'*g_val as the terms
+        // (1, c), (-v', g_val). It must give exactly verify()'s verdict on the
+        // evaluated point, for the right claimed value and for a wrong one.
+        let pp = PublicParams::setup();
+        let v = value_to_scalar(1_500);
+        let o = Opening { id: hash_identity(b"alice"), val: v, blinding: random_blinding() };
+        let c = commit(&pp, &o);
+        let bases = [pp.g_iden, pp.g_ran];
+        let bind = |claimed: Scalar| move |ch: Challenge| ch.point(b"c", &c.0).scalar(b"v", &claimed);
+        let proof = prove(&pp, b"test/terms", &bases, &[o.id, o.blinding], bind(v));
+
+        for claimed in [v, value_to_scalar(1_501)] {
+            let u = c.0 - claimed * pp.g_val;
+            let as_point = verify(&pp, b"test/terms", &bases, &u, &proof, bind(claimed));
+            let terms = [(Scalar::ONE, c.0), (-claimed, pp.g_val)];
+            let as_terms = verify_terms(&pp, b"test/terms", &bases, &terms, &proof, bind(claimed));
+            assert_eq!(as_point, as_terms);
+            assert_eq!(as_terms, claimed == v);
+        }
     }
 
     #[test]

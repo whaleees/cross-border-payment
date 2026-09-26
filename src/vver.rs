@@ -93,8 +93,9 @@ impl VVerProof {
         ctx: &[u8],
     ) -> bool {
         let sp = SigmaProof { t: self.t, z: vec![self.z_iden, self.z_ran] };
-        let u = c.0 - v_pub * pp.g_val;
-        sigma::verify(pp, DS, &[pp.g_iden, pp.g_ran], &u, &sp, bind(c, v_pub, ctx))
+        // U = c - v'*g_val, handed over as terms so v'*g_val folds into the engine's MSM.
+        let u = [(Scalar::ONE, c.0), (-v_pub, pp.g_val)];
+        sigma::verify_terms(pp, DS, &[pp.g_iden, pp.g_ran], &u, &sp, bind(c, v_pub, ctx))
     }
 }
 
