@@ -63,28 +63,35 @@ def cargo(*args):
     return out
 
 
-def proof_sizes():
-    """The line printed by tests/sizes.rs, and its numbers: {'commitment': 32, 'ideq': 96, ...}."""
+def run_sizes():
+    """The line printed by tests/sizes.rs."""
     out = cargo("test", "proof_sizes", "--", "--nocapture")
-    line = next(l for l in out.splitlines() if l.startswith("commitment "))
+    return next(l for l in out.splitlines() if l.startswith("commitment "))
+
+
+def parse_sizes(line):
+    """'commitment 32  ideq 96 ...' -> {'commitment': 32, 'ideq': 96, ...}"""
     words = line.split()
-    return line, dict(zip(words[::2], map(int, words[1::2])))
+    return dict(zip(words[::2], map(int, words[1::2])))
 
 
-def rates():
-    """The FAR/FRR table printed by tests/rates.rs (release build), and its rows."""
+def run_rates():
+    """The FAR/FRR table printed by tests/rates.rs (release build)."""
     out = cargo("test", "--release", "--test", "rates", "--", "--ignored", "--nocapture")
     lines = out.splitlines()
     start = next(i for i, l in enumerate(lines) if l.startswith("FAR / FRR over"))
     end = next(i for i, l in enumerate(lines) if "errors in" in l)
-    table = lines[start:end + 1]
+    return "\n".join(lines[start:end + 1])
+
+
+def parse_rates(table):
     rows = []
-    for l in table:
+    for l in table.splitlines():
         m = re.match(r"^(.+?)\s{2,}(.+?)\s+(\d+) / (\d+)\s+(\d+) (false rejections|false approvals)$", l)
         if m:
             rows.append({"protocol": m[1].strip(), "scenario": m[2].strip(), "accepted": int(m[3]),
                          "runs": int(m[4]), "errors": int(m[5]), "honest": m[6] == "false rejections"})
-    return "\n".join(table), rows
+    return rows
 
 
 def sh(*cmd):
@@ -230,10 +237,22 @@ def crossing(xs, ys, limit):
     return None
 
 
+def first_from(xs, good):
+    """The smallest x from which good holds at every later point too (None if it never settles)."""
+    for i, x in enumerate(xs):
+        if all(good[i:]):
+            return x
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", default=str(ROOT / "results"), help="output folder (default: results/)")
-    out = pathlib.Path(parser.parse_args().out)
+    parser.add_argument("--render-only", action="store_true",
+                        help="redraw the folder from its saved run.json, sizes.txt and rates.txt: no tests, "
+                             "no machine query (the machine settings may have changed since the run)")
+    args = parser.parse_args()
+    out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -255,12 +274,20 @@ def main():
         batching.append({"m": m, "batch": bt, "batch_sd": bsd, "individual": it, "individual_sd": isd,
                          "batch_per_proof": bt / m, "individual_per_proof": it / m})
 
-    print("running the proof-size test")
-    size_line, size = proof_sizes()
-    print("running the FAR/FRR test (release; minutes)")
-    rates_table, rate_rows = rates()
-    print("collecting machine details")
-    info = machine()
+    if args.render_only:
+        print("re-rendering from the saved run in", out)
+        info = json.loads((out / "run.json").read_text(encoding="utf-8"))
+        size_line = (out / "sizes.txt").read_text(encoding="utf-8").strip()
+        rates_table = (out / "rates.txt").read_text(encoding="utf-8").rstrip("\n")
+    else:
+        print("running the proof-size test")
+        size_line = run_sizes()
+        print("running the FAR/FRR test (release; minutes)")
+        rates_table = run_rates()
+        print("collecting machine details")
+        info = machine()
+        (out / "run.json").write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    size, rate_rows = parse_sizes(size_line), parse_rates(rates_table)
     first, last = (datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M") for t in (min(data_times), max(data_times)))
     info["Criterion data written"] = first if first == last else f"{first} to {last}"
 
@@ -292,19 +319,23 @@ def main():
 
     # README.md -- every number below is computed from the files above
     names = {stem: name for name, stem, _ in PROTOCOLS}
-    slow_p = max(prove, key=lambda s: prove[s][0])
-    slow_v = max(verify, key=lambda s: verify[s][0])
+    basic_stems, advanced_stems = ["ideq", "vver"], ["veq", "fulleq", "txver", "mideq_n10"]
     tps_adv, tps_basic, tps_e2e = 1e6 / verify["txver"][0], 1e6 / pair_verify[0], 1e6 / e2e[0]
-    honest = [r for r in rate_rows if r["honest"]]
-    adversarial = [r for r in rate_rows if not r["honest"]]
-    false_rej = sum(r["runs"] - r["accepted"] for r in honest)
-    false_app = sum(r["accepted"] for r in adversarial)
-    runs = rate_rows[0]["runs"]
-    proof_bytes = [size[key] for _, _, key in PROTOCOLS]
-    ok = lambda b: "✓" if b else "✗"
+
+    def ok(passed):
+        return "✓" if passed else "✗"
 
     def us(v):
         return f"{v[0]:,.0f} ± {v[1]:,.0f}"
+
+    def slowest(table, stems):
+        s = max(stems, key=lambda s: table[s][0])
+        return table[s][0], names[s]
+
+    def wrong(protocols, honest):
+        """(wrong verdicts, runs) over the FAR/FRR rows of these protocols."""
+        rows = [r for r in rate_rows if r["protocol"].split(" (")[0] in protocols and r["honest"] == honest]
+        return sum(r["runs"] - r["accepted"] if honest else r["accepted"] for r in rows), sum(r["runs"] for r in rows)
 
     big, small = scaling[-1], scaling[0]
     cross_v = crossing(NS, [r["mideq_verify"] for r in scaling], 5000)
@@ -324,31 +355,116 @@ def main():
         md += ["> **Warning:** CPU boost was on (maximum processor state 100 %). Timings can drift between "
                "benchmarks; pin the clock and re-run before quoting ratios (guide-benchmark/07).", ""]
     md += ["## Run", "", "| | |", "|---|---|"] + [f"| {k} | {v} |" for k, v in info.items()] + [""]
+    b_prove, b_prove_by = slowest(prove, basic_stems)
+    b_verify, b_verify_by = slowest(verify, basic_stems)
+    b_far, b_far_runs = wrong(["IDEq", "VVer"], honest=False)
+    b_frr, b_frr_runs = wrong(["IDEq", "VVer"], honest=True)
     md += [
-        "## Metric targets (proposal Table 3.1; commit time from the RTM)",
+        "## Basic method — metric targets (proposal Table 3.1; commit time from the RTM)",
+        "",
+        "Table 3.1 was written for the Basic method: the commitment, Π.IDEq and Π.VVer.",
         "",
         "| Metric | Target | Measured | Pass |",
         "|---|---|---|---|",
         f"| Commitment generation time | < 10 ms | {fmt_ms(commit[0])} | {ok(commit[0] < 10_000)} |",
-        f"| Proof generation time (slowest) | < 10 ms | {fmt_ms(prove[slow_p][0])} ({names[slow_p]}) | {ok(prove[slow_p][0] < 10_000)} |",
-        f"| Verification time (slowest) | < 5 ms | {fmt_ms(verify[slow_v][0])} ({names[slow_v]}) | {ok(verify[slow_v][0] < 5_000)} |",
-        f"| Throughput (transactions verified per second, one core) | > 100 TPS | {tps_adv:,.0f} (Π.TxVer), "
-        f"{tps_basic:,.0f} (Π.IDEq + Π.VVer); end to end {tps_e2e:,.0f} | {ok(min(tps_adv, tps_basic) > 100)} |",
+        f"| Proof generation time | < 10 ms | {fmt_ms(b_prove)} (slowest: {b_prove_by}) | {ok(b_prove < 10_000)} |",
+        f"| Verification time | < 5 ms | {fmt_ms(b_verify)} (slowest: {b_verify_by}) | {ok(b_verify < 5_000)} |",
+        f"| Throughput (transactions verified per second, one core) | > 100 TPS | {tps_basic:,.0f} "
+        f"(Π.IDEq + Π.VVer per transaction) | {ok(tps_basic > 100)} |",
         f"| Commitment size | 32–64 B | {size['commitment']} B | {ok(32 <= size['commitment'] <= 64)} |",
-        f"| Communication complexity | O(log p) | proofs are {min(proof_bytes)}–{max(proof_bytes)} B: a fixed number "
-        f"of 32-byte elements | {ok(all(b % 32 == 0 for b in proof_bytes))} |",
-        "| Soundness error | ≤ 1/p | analytical: Theorems 1–6 (a factor Q in the random-oracle model) | — |",
-        f"| False approval rate | 0 | {false_app} / {runs * len(adversarial):,} adversarial runs | {ok(false_app == 0)} |",
-        f"| False rejection rate | 0 | {false_rej} / {runs * len(honest):,} honest runs | {ok(false_rej == 0)} |",
+        f"| Communication complexity | O(log p) | Π.IDEq {size['ideq']} B, Π.VVer {size['vver']} B: a fixed "
+        f"number of 32-byte elements | {ok(size['ideq'] % 32 == 0 and size['vver'] % 32 == 0)} |",
+        "| Soundness error | ≤ 1/p | analytical: Theorems 1–2 (a factor Q in the random-oracle model) | — |",
+        f"| False approval rate | 0 | {b_far} / {b_far_runs:,} adversarial runs | {ok(b_far == 0)} |",
+        f"| False rejection rate | 0 | {b_frr} / {b_frr_runs:,} honest runs | {ok(b_frr == 0)} |",
+        "",
+    ]
+
+    # The Advanced method has no Table-3.1 targets of its own: its criteria are the spec's claims.
+    n_from = first_from(NS, [r["mideq_prove"] < r["basic_prove"] and r["mideq_verify"] < r["basic_verify"]
+                             for r in scaling])
+    mideq_cost = "never cheaper in the measured range"
+    if n_from:
+        at = next(r for r in scaling if r["n"] == n_from)
+        mideq_cost = (f"cheaper from n = {n_from}: {at['basic_prove'] / at['mideq_prove']:.1f}× less time to prove, "
+                      f"{at['basic_verify'] / at['mideq_verify']:.1f}× to verify; at n = {big['n']:,}: "
+                      f"{big['basic_prove'] / big['mideq_prove']:.1f}× and {big['basic_verify'] / big['mideq_verify']:.1f}×")
+        if n_from > NS[0]:
+            mideq_cost += (f". At n = {small['n']} (one Π.IDEq replaced, nothing to aggregate) it takes "
+                           f"{small['mideq_prove'] / small['basic_prove']:.2f}× / "
+                           f"{small['mideq_verify'] / small['basic_verify']:.2f}× the time")
+    tx_p, tx_v = prove["txver"][0] / pair_prove[0], verify["txver"][0] / pair_verify[0]
+    tx_split = next(r for r in rate_rows if r["protocol"] == "TxVer" and r["scenario"] == "false statement")
+    m_from = first_from(MS, [r["batch"] < r["individual"] for r in batching])
+    per_proof_falls = batching[-1]["batch_per_proof"] < batching[0]["batch_per_proof"]
+    indiv = [r["individual_per_proof"] for r in batching]
+    batch_cost = "never faster in the measured range"
+    if m_from:
+        at = next(r for r in batching if r["m"] == m_from)
+        batch_cost = (f"{b_first['batch_per_proof']:.0f} → {b_last['batch_per_proof']:.0f} µs per proof as m grows "
+                      f"to {b_last['m']:,}, while one-by-one stays {min(indiv):.0f}–{max(indiv):.0f} µs; faster from "
+                      f"m = {m_from} ({at['individual'] / at['batch']:.2f}×), "
+                      f"{b_last['individual'] / b_last['batch']:.2f}× at m = {b_last['m']:,}")
+        if m_from > MS[0]:
+            batch_cost += f"; a batch of {b_first['m']} is slower ({b_first['individual'] / b_first['batch']:.2f}×)"
+    batch_far, batch_runs = wrong(["BatchVer"], honest=False)
+    a_prove, a_prove_by = slowest(prove, advanced_stems)
+    a_verify, a_verify_by = slowest(verify, advanced_stems)
+
+    def all_wrong(protocol):
+        (w1, r1), (w2, r2) = wrong([protocol], True), wrong([protocol], False)
+        return w1 + w2, r1 + r2
+
+    veq_w, veq_runs = all_wrong("VEq")
+    fulleq_w, fulleq_runs = all_wrong("FullEq")
+    md += [
+        "## Advanced method — the spec's own claims",
+        "",
+        "No document sets numeric targets for the Advanced method; Table 3.1 predates it. Its criteria are the "
+        "claims of `proposed-method-advanced.docx` (§1: what each protocol adds; §5: BatchVer; §6: cost summary) "
+        "and the comparisons of `IBC_Basic_Advanced.docx` §D.5 (tasks a–d), each measured against the Basic "
+        "method, plus Table 3.1's per-proof targets.",
+        "",
+        "| Protocol | Criterion (source) | Measured | Pass |",
+        "|---|---|---|---|",
+        f"| Π.MIDEq | one 96 B proof for any n, against 96(n − 1) B for n − 1 Π.IDEq proofs (§6; task b) | "
+        f"{size['mideq']} B at n = 2, 10 and 100 | {ok(size['mideq'] == 96)} |",
+        f"| Π.MIDEq | cheaper than n − 1 Π.IDEq proofs: 2 exponentiations + O(n) scalar work against 4(n − 1) "
+        f"exponentiations (§6; task b) | {mideq_cost} | {ok(n_from is not None)}"
+        f"{f' (n ≥ {n_from})' if n_from else ''} |",
+        f"| Π.TxVer | the same size as the two separate proofs (§6) | {size['txver']} B = {size['ideq']} + "
+        f"{size['vver']} B | {ok(size['txver'] == size['ideq'] + size['vver'])} |",
+        f"| Π.TxVer | no overhead against Π.IDEq + Π.VVer: 1 hash, 1 challenge, one MSM of 7 bases instead of 2, 2 "
+        f"and 2 checks (§6; task d) | prove {tx_p:.2f}×, verify {tx_v:.2f}× the pair's time | "
+        f"{ok(tx_p <= 1 and tx_v <= 1)} |",
+        f"| Π.TxVer | inseparable: a proof with either clause false is rejected (§1, §6) | {tx_split['accepted']} / "
+        f"{tx_split['runs']:,} such proofs accepted | {ok(tx_split['accepted'] == 0)} |",
+        f"| Π.VEq | two hidden values shown equal in 96 B — not expressible in Basic (§1, §6) | {size['veq']} B; "
+        f"{veq_w} wrong verdicts in {veq_runs:,} runs | {ok(size['veq'] == 96 and veq_w == 0)} |",
+        f"| Π.FullEq | a re-randomisation shown in 64 B — not expressible in Basic (§1, §6) | {size['fulleq']} B; "
+        f"{fulleq_w} wrong verdicts in {fulleq_runs:,} runs | {ok(size['fulleq'] == 64 and fulleq_w == 0)} |",
+        f"| BatchVer | cost per proof falls with m, below m separate checks: one MSM of 2m + 2 bases (§5, §6; "
+        f"task c) | {batch_cost} | {ok(per_proof_falls and m_from is not None)}"
+        f"{f' (m ≥ {m_from})' if m_from else ''} |",
+        f"| BatchVer | a batch hiding one bad proof is rejected (Theorem 6) | {batch_far} / {batch_runs:,} accepted | "
+        f"{ok(batch_far == 0)} |",
+        f"| all four proofs | Table 3.1's per-proof targets: prove < 10 ms, verify < 5 ms | slowest "
+        f"{fmt_ms(a_prove)} ({a_prove_by}) / {fmt_ms(a_verify)} ({a_verify_by}) | "
+        f"{ok(a_prove < 10_000 and a_verify < 5_000)} |",
+        f"| Π.TxVer | Table 3.1's throughput: > 100 transactions verified per second | {tps_adv:,.0f}; end to end "
+        f"(commit + prove + verify) {tps_e2e:,.0f} | {ok(tps_adv > 100)} |",
+        "| all | soundness error: 1/p (Π.VEq, Π.TxVer), 2/p (Π.MIDEq), 2^−ℓ (BatchVer) (§6) | analytical: "
+        "Theorems 3–6 (a factor Q in the random-oracle model; ≈ Q/p for the hash-derived batch weights) | — |",
         "",
         "## Per protocol (task a) — mean ± standard deviation, µs",
         "",
-        "| Protocol | Prove | Verify | Proof size |",
-        "|---|---|---|---|",
+        "| Method | Protocol | Prove | Verify | Proof size |",
+        "|---|---|---|---|---|",
     ]
-    md += [f"| {name} | {us(prove[s])} | {us(verify[s])} | {size[key]} B |" for name, s, key in PROTOCOLS]
+    md += [f"| {'Basic' if s in basic_stems else 'Advanced'} | {name} | {us(prove[s])} | {us(verify[s])} | "
+           f"{size[key]} B |" for name, s, key in PROTOCOLS]
     md += [
-        f"| Commit | {us(commit)} | | {size['commitment']} B (commitment) |",
+        f"| both | Commit | {us(commit)} | | {size['commitment']} B (commitment) |",
         "",
         "Mean ± standard deviation of criterion's samples (`new/estimates.json`), as Bab 3 asks. The line "
         "criterion prints in the terminal shows a different estimator (a regression slope), so its middle "
