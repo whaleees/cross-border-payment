@@ -1,0 +1,13 @@
+{
+  "Date": "2026-09-27 01:13",
+  "Git commit": "7a337a6",
+  "CPU": "AMD Ryzen 7 6800H with Radeon Graphics",
+  "Cores / threads": "8 / 16",
+  "RAM": "15 GB",
+  "OS": "Microsoft Windows 11 Home Single Language (build 26200)",
+  "Power": "on AC",
+  "Power plan": "Turbo",
+  "Maximum processor state (AC)": "99 %",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "criterion": "0.5.1"
+}

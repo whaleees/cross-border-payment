@@ -1,0 +1,17 @@
+benchmark,mean_us,std_dev_us
+protocols/commit,83.49,4.40
+protocols/ideq_prove,81.80,1.93
+protocols/ideq_verify,60.30,2.83
+protocols/vver_prove,77.66,1.36
+protocols/vver_verify,61.72,0.94
+protocols/veq_prove,83.26,3.34
+protocols/veq_verify,60.57,2.46
+protocols/fulleq_prove,54.18,1.20
+protocols/fulleq_verify,53.93,0.83
+protocols/txver_prove,140.55,2.08
+protocols/txver_verify,117.49,1.27
+protocols/mideq_n10_prove,174.89,2.94
+protocols/mideq_n10_verify,198.48,7.08
+protocols/basic_tx_prove,157.56,2.27
+protocols/basic_tx_verify,120.84,1.18
+tps/transaction,344.82,11.02

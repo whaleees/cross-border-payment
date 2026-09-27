@@ -1,0 +1,1 @@
+commitment 32  ideq 96  vver 96  veq 96  fulleq 64  mideq 96  txver 192

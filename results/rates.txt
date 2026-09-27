@@ -1,0 +1,31 @@
+FAR / FRR over 10000 fresh runs per scenario
+
+protocol        scenario                        accepted   errors
+IDEq            honest                     10000 / 10000    0 false rejections
+IDEq            false statement                0 / 10000    0 false approvals
+IDEq            replayed to another ctx        0 / 10000    0 false approvals
+IDEq            tampered response              0 / 10000    0 false approvals
+VVer            honest                     10000 / 10000    0 false rejections
+VVer            false statement                0 / 10000    0 false approvals
+VVer            replayed to another ctx        0 / 10000    0 false approvals
+VVer            tampered response              0 / 10000    0 false approvals
+VEq             honest                     10000 / 10000    0 false rejections
+VEq             false statement                0 / 10000    0 false approvals
+VEq             replayed to another ctx        0 / 10000    0 false approvals
+VEq             tampered response              0 / 10000    0 false approvals
+FullEq          honest                     10000 / 10000    0 false rejections
+FullEq          false statement                0 / 10000    0 false approvals
+FullEq          replayed to another ctx        0 / 10000    0 false approvals
+FullEq          tampered response              0 / 10000    0 false approvals
+TxVer           honest                     10000 / 10000    0 false rejections
+TxVer           false statement                0 / 10000    0 false approvals
+TxVer           replayed to another ctx        0 / 10000    0 false approvals
+TxVer           tampered response              0 / 10000    0 false approvals
+MIDEq (n=5)     honest                     10000 / 10000    0 false rejections
+MIDEq (n=5)     false statement                0 / 10000    0 false approvals
+MIDEq (n=5)     replayed to another ctx        0 / 10000    0 false approvals
+MIDEq (n=5)     tampered response              0 / 10000    0 false approvals
+BatchVer (m=8)  honest batch               10000 / 10000    0 false rejections
+BatchVer (m=8)  one false proof in 8           0 / 10000    0 false approvals
+
+0 errors in 10000 runs => that rate is below 3/10000 = 0.030 % (95 % confidence)
