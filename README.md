@@ -230,6 +230,7 @@ src/
   txver.rs        Π.TxVer
   mideq.rs        Π.MIDEq
   batchver.rs     BatchVer
+examples/demo.rs  a live demo: one payment story that runs every Advanced protocol
 benches/          speed measurements (per protocol, and how they scale)
 tests/            proof sizes; false approval and rejection counts
 scripts/          report.py, which turns a benchmark run into results/
@@ -243,6 +244,7 @@ Requires Rust 1.85 or newer (edition 2024).
 
 ```bash
 cargo test                   # run the tests
+cargo run --release --example demo   # live demo (add -- --step to pause after each scene)
 cargo bench                  # measure speed (about 8-10 minutes)
 python scripts/report.py     # build results/ from the measurements (needs matplotlib)
 ```
