@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::Identity;
@@ -7,6 +9,7 @@ pub const LABEL_G_IDEN: &[u8] = b"IBC/v1/gen/iden";
 pub const LABEL_G_VAL: &[u8] = b"IBC/v1/gen/val";
 pub const LABEL_G_RAN: &[u8] = b"IBC/v1/gen/ran";
 pub const LABEL_ID_HASH: &[u8] = b"IBC/v1/id-to-scalar";
+pub const LABEL_DERIVED: &[u8] = b"IBC/v1/gen/derived/";
 
 // Public parameters
 // 3 independent generators
@@ -41,6 +44,30 @@ impl PublicParams {
             self.g_val.compress().to_bytes(),
             self.g_ran.compress().to_bytes(),
         ]
+    }
+
+    // n more generators for a protocol that shares pp (e.g. a commitment key).
+    // Same hash-to-group as Setup, one label per generator:
+    //   LABEL_DERIVED || set || "/" || i (u32, little-endian)
+    // so no one knows a discrete-log relation between these and g_iden, g_val, g_ran.
+    pub fn derive_generators(&self, set: &[u8], n: usize) -> Vec<RistrettoPoint> {
+        let gens: Vec<RistrettoPoint> = (0..n as u32)
+            .map(|i| {
+                let mut label = LABEL_DERIVED.to_vec();
+                label.extend_from_slice(set);
+                label.push(b'/');
+                label.extend_from_slice(&i.to_le_bytes());
+                RistrettoPoint::hash_from_bytes::<Sha512>(&label)
+            })
+            .collect();
+
+        // Setup's step-3 abort, extended to the new generators.
+        let mut seen: HashSet<[u8; 32]> = self.to_bytes().into_iter().collect();
+        for g in &gens {
+            assert!(*g != RistrettoPoint::identity(), "derived generator is the identity element");
+            assert!(seen.insert(g.compress().to_bytes()), "derived generator coincides with another");
+        }
+        gens
     }
 }
 
@@ -87,6 +114,40 @@ mod tests {
                               ("g_ran",  pp.to_bytes()[2])] {
             let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
             println!("{name} = {hex}");
+        }
+    }
+
+    #[test]
+    fn generators_match_published_test_vectors() {
+        let hex = |b: [u8; 32]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let [iden, val, ran] = PublicParams::setup().to_bytes();
+        assert_eq!(hex(iden), "d47874bc8ca4f558116fa93fbb51474c6c39d165f423f7b54625e5b071321201");
+        assert_eq!(hex(val),  "daabecbf093fc1ec0e2b40f600b84736df9519276cb431697652bc872c9e525f");
+        assert_eq!(hex(ran),  "7a2cd623b6bdf05f52998960fe69d6d94d860cdc519e9a857ed725fa49116a73");
+    }
+
+    #[test]
+    fn derived_generators_are_deterministic() {
+        let pp = PublicParams::setup();
+        assert_eq!(pp.derive_generators(b"ck", 8), pp.derive_generators(b"ck", 8));
+    }
+
+    #[test]
+    fn derived_generators_depend_on_set_and_index() {
+        let pp = PublicParams::setup();
+        let a = pp.derive_generators(b"ck", 2);
+        let b = pp.derive_generators(b"range", 2);
+        assert_ne!(a[0], a[1]);
+        assert_ne!(a[0], b[0]);
+        // A longer set is the shorter one extended, not a different one.
+        assert_eq!(pp.derive_generators(b"ck", 5)[..2], a[..]);
+    }
+
+    #[test]
+    fn derived_generators_avoid_pp() {
+        let pp = PublicParams::setup();
+        for g in pp.derive_generators(b"ck", 64) {
+            assert!(g != pp.g_iden && g != pp.g_val && g != pp.g_ran);
         }
     }
 
