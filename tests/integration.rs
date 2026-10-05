@@ -20,6 +20,10 @@ const ROUND_B: [u8; 32] = [0xB; 32];
 const VALUE: u8 = 0;
 const AGE: u8 = 1;
 
+fn ctx(stage: u8, vector: u8, slot: u32) -> [u8; RoundCtx::LEN] {
+    RoundCtx { round_id: ROUND_A, stage, vector, slot, prev: [0; 32] }.to_bytes()
+}
+
 fn alice() -> Scalar {
     hash_identity(b"alice")
 }
@@ -28,6 +32,53 @@ fn alice() -> Scalar {
 fn registration(pp: &PublicParams) -> (Commitment, Opening) {
     let o = Opening { id: alice(), val: Scalar::ZERO, blinding: random_blinding() };
     (commit(pp, &o), o)
+}
+
+// A two-basis commitment v*g + r*h with g = g_val, h = g_ran: an IBC opening with id = 0.
+fn two_basis(v: Scalar) -> Opening {
+    Opening { id: Scalar::ZERO, val: v, blinding: random_blinding() }
+}
+
+// alice's commitments to these numbers (amounts or ages).
+fn alices(pp: &PublicParams, xs: &[u64]) -> (Vec<Commitment>, Vec<Opening>) {
+    let os: Vec<Opening> = xs
+        .iter()
+        .map(|x| Opening { id: alice(), val: value_to_scalar(*x), blinding: random_blinding() })
+        .collect();
+    (os.iter().map(|o| commit(pp, o)).collect(), os)
+}
+
+// Re-randomise every slot, as the mixer does, and keep the new openings (Lemma 1).
+fn rerand_all(pp: &PublicParams, cs: &[Commitment], os: &[Opening]) -> (Vec<Commitment>, Vec<Opening>) {
+    let rhos: Vec<Scalar> = cs.iter().map(|_| random_blinding()).collect();
+    let outs = cs.iter().zip(&rhos).map(|(c, rho)| rerand(pp, c, rho)).collect();
+    let oos = os.iter().zip(&rhos).map(|(o, rho)| o.rerand(rho)).collect();
+    (outs, oos)
+}
+
+// Lemma 5: the verifier adds the public commitments...
+fn sum(cs: &[Commitment]) -> Commitment {
+    cs.iter().copied().reduce(|a, b| a + b).expect("at least one commitment")
+}
+
+// ...and the prover adds the openings.
+fn sum_opening(os: &[Opening]) -> Opening {
+    Opening {
+        id: os.iter().map(|o| o.id).sum(),
+        val: os.iter().map(|o| o.val).sum(),
+        blinding: os.iter().map(|o| o.blinding).sum(),
+    }
+}
+
+// Stage 3: c_ST = ST*g_val + r_s*g_ran and one Π.VEq(c_sum, c_ST).
+// Returns the verdict and the hidden total that Stage 4's range proof would check.
+fn stage3(pp: &PublicParams, outs: &[Commitment], oos: &[Opening]) -> (bool, Scalar) {
+    let o_sum = sum_opening(oos);
+    let o_st = two_basis(o_sum.val);
+    let c_st = commit(pp, &o_st);
+    let x = ctx(3, VALUE, 0);
+    let proof = VEqProof::prove(pp, &sum(outs), &c_st, &o_sum, &o_st, &x);
+    (proof.verify(pp, &sum(outs), &c_st, &x), o_st.val)
 }
 
 // ---- Step 01: ReRand and Lemma 3 ---------------------------------------------
@@ -85,4 +136,86 @@ fn proof_does_not_move_between_rounds_stages_vectors_or_slots() {
     ] {
         assert!(!proof.verify(&pp, &c_ref, &c_new, Scalar::ZERO, &other.to_bytes()));
     }
+}
+
+// ---- Step 04: the bridge (Lemma 4) and the hidden sum (Lemma 5) ---------------
+
+#[test]
+fn lemma4_bridge_same_value_verifies() {
+    let pp = PublicParams::setup();
+    let o_age = Opening { id: alice(), val: value_to_scalar(14), blinding: random_blinding() };
+    let c_age = commit(&pp, &o_age);
+    let o_tilde = two_basis(o_age.val);
+    let c_tilde = commit(&pp, &o_tilde);
+    let x = ctx(2, AGE, 5);
+
+    // Witness (id - 0, r - r~): exactly Π.VEq's (id0 - id1, r0 - r1).
+    let proof = VEqProof::prove(&pp, &c_age, &c_tilde, &o_age, &o_tilde, &x);
+    assert!(proof.verify(&pp, &c_age, &c_tilde, &x));
+}
+
+#[test]
+fn lemma4_bridge_wrong_value_fails() {
+    let pp = PublicParams::setup();
+    let o_age = Opening { id: alice(), val: value_to_scalar(3), blinding: random_blinding() };
+    let c_age = commit(&pp, &o_age);
+    let o_tilde = two_basis(value_to_scalar(14)); // claims an older age
+    let c_tilde = commit(&pp, &o_tilde);
+    let x = ctx(2, AGE, 5);
+
+    let proof = VEqProof::prove(&pp, &c_age, &c_tilde, &o_age, &o_tilde, &x);
+    assert!(!proof.verify(&pp, &c_age, &c_tilde, &x));
+}
+
+#[test]
+fn lemma4_veq_alone_does_not_make_c_tilde_two_basis() {
+    // c~ with a g_iden term still passes: Π.VEq lets the g_iden exponent be anything.
+    // "c~ is two-basis" therefore comes from the gate's own extractor, not from Π.VEq.
+    let pp = PublicParams::setup();
+    let o_age = Opening { id: alice(), val: value_to_scalar(14), blinding: random_blinding() };
+    let c_age = commit(&pp, &o_age);
+    let o_tilde = Opening { id: Scalar::from(5u64), ..two_basis(o_age.val) };
+    let c_tilde = commit(&pp, &o_tilde);
+    let x = ctx(2, AGE, 5);
+
+    let proof = VEqProof::prove(&pp, &c_age, &c_tilde, &o_age, &o_tilde, &x);
+    assert!(proof.verify(&pp, &c_age, &c_tilde, &x));
+}
+
+#[test]
+fn lemma5_sum_commits_to_n_times_id() {
+    let pp = PublicParams::setup();
+    let (cs, os) = alices(&pp, &[100, 250, 75, 300, 40]);
+    let (outs, oos) = rerand_all(&pp, &cs, &os);
+
+    let want = Opening {
+        id: Scalar::from(5u64) * alice(),
+        val: value_to_scalar(765),
+        blinding: oos.iter().map(|o| o.blinding).sum(),
+    };
+    assert_eq!(sum(&outs), commit(&pp, &want));
+}
+
+#[test]
+fn hidden_sum_verifies() {
+    let pp = PublicParams::setup();
+    let (cs, os) = alices(&pp, &[100, 250, 75, 300, 40]);
+    let (outs, oos) = rerand_all(&pp, &cs, &os);
+    let (ok, total) = stage3(&pp, &outs, &oos);
+    assert!(ok);
+    assert_eq!(total, value_to_scalar(765));
+}
+
+#[test]
+fn hidden_sum_wrong_total_fails() {
+    let pp = PublicParams::setup();
+    let (cs, os) = alices(&pp, &[100, 250, 75, 300, 40]);
+    let (outs, oos) = rerand_all(&pp, &cs, &os);
+    let o_sum = sum_opening(&oos);
+    let o_st = two_basis(o_sum.val - Scalar::ONE); // one less than the real total
+    let c_st = commit(&pp, &o_st);
+    let x = ctx(3, VALUE, 0);
+
+    let proof = VEqProof::prove(&pp, &sum(&outs), &c_st, &o_sum, &o_st, &x);
+    assert!(!proof.verify(&pp, &sum(&outs), &c_st, &x));
 }
