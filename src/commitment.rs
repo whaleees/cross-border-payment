@@ -30,7 +30,21 @@ pub fn commit(pp: &PublicParams, o: &Opening) -> Commitment
 // Recompute and compare
 pub fn verify(pp: &PublicParams, c: &Commitment, o: &Opening) -> bool
 {
-    commit(pp, o) == *c 
+    commit(pp, o) == *c
+}
+
+// ReRand (Definition 4): c' = c + rho*g_ran. Only the blinding moves.
+pub fn rerand(pp: &PublicParams, c: &Commitment, rho: &Scalar) -> Commitment
+{
+    Commitment(c.0 + rho * pp.g_ran)
+}
+
+impl Opening {
+    // The opening of rerand(pp, c, rho): same id and val, blinding + rho (Lemma 1)
+    pub fn rerand(&self, rho: &Scalar) -> Opening
+    {
+        Opening { blinding: self.blinding + rho, ..*self }
+    }
 }
 
 impl Commitment {
@@ -141,5 +155,31 @@ mod tests {
             blinding: o1.blinding + o2.blinding,
         };
         assert_eq!(commit(&pp, &o1) + commit(&pp, &o2), commit(&pp, &sum));
+    }
+
+    #[test]
+    fn rerand_keeps_identity_and_value() {
+        // Lemma 1: ReRand(Com(id, v; r), rho) = Com(id, v; r + rho)
+        let (pp, o) = sample();
+        let c = commit(&pp, &o);
+        let rho = random_blinding();
+        assert_eq!(rerand(&pp, &c, &rho), commit(&pp, &o.rerand(&rho)));
+    }
+
+    #[test]
+    fn rerand_changes_the_point() {
+        let (pp, o) = sample();
+        let c = commit(&pp, &o);
+        assert_ne!(rerand(&pp, &c, &random_blinding()), c);
+    }
+
+    #[test]
+    fn rerand_twice_is_rerand_once() {
+        // Two shuffles in a row: the prover just adds the two factors.
+        let (pp, o) = sample();
+        let c = commit(&pp, &o);
+        let (a, b) = (random_blinding(), random_blinding());
+        assert_eq!(rerand(&pp, &rerand(&pp, &c, &a), &b), rerand(&pp, &c, &(a + b)));
+        assert_eq!(o.rerand(&a).rerand(&b).blinding, o.rerand(&(a + b)).blinding);
     }
 }
