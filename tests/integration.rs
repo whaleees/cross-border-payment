@@ -219,3 +219,84 @@ fn hidden_sum_wrong_total_fails() {
     let proof = VEqProof::prove(&pp, &sum(&outs), &c_st, &o_sum, &o_st, &x);
     assert!(!proof.verify(&pp, &sum(&outs), &c_st, &x));
 }
+
+// ---- Step 05: the zeroed slot ----------------------------------------------------
+
+#[test]
+fn txver_zero_binds_c_new() {
+    let pp = PublicParams::setup();
+    let (c_ref, o_ref) = registration(&pp);
+    let o_new = Opening { id: alice(), val: Scalar::ZERO, blinding: random_blinding() };
+    let c_new = commit(&pp, &o_new);
+    let x = ctx(2, VALUE, 5);
+
+    let proof = TxVerProof::prove(&pp, &c_ref, &c_new, Scalar::ZERO, &o_ref, &o_new, &x);
+    assert!(proof.verify(&pp, &c_ref, &c_new, Scalar::ZERO, &x));
+}
+
+#[test]
+fn txver_zero_rejects_a_nonzero_c_new() {
+    let pp = PublicParams::setup();
+    let (c_ref, o_ref) = registration(&pp);
+    let o_new = Opening { id: alice(), val: -value_to_scalar(500), blinding: random_blinding() };
+    let c_new = commit(&pp, &o_new);
+    let x = ctx(2, VALUE, 5);
+
+    let proof = TxVerProof::prove(&pp, &c_ref, &c_new, Scalar::ZERO, &o_ref, &o_new, &x);
+    assert!(!proof.verify(&pp, &c_ref, &c_new, Scalar::ZERO, &x));
+}
+
+#[test]
+fn txver_zero_rejects_a_foreign_c_new() {
+    let pp = PublicParams::setup();
+    let (c_ref, o_ref) = registration(&pp);
+    let o_new = Opening { id: hash_identity(b"bob"), val: Scalar::ZERO, blinding: random_blinding() };
+    let c_new = commit(&pp, &o_new);
+    let x = ctx(2, VALUE, 5);
+
+    let proof = TxVerProof::prove(&pp, &c_ref, &c_new, Scalar::ZERO, &o_ref, &o_new, &x);
+    assert!(!proof.verify(&pp, &c_ref, &c_new, Scalar::ZERO, &x));
+}
+
+// slot + c_delta, where c_delta carries `delta_id`. Does Π.TxVer(c_ref, ., 0) accept?
+fn zero_slot_with(delta_id: Scalar) -> bool {
+    let pp = PublicParams::setup();
+    let (c_ref, o_ref) = registration(&pp);
+    let o_slot = Opening { id: alice(), val: value_to_scalar(300), blinding: random_blinding() };
+    let o_delta = Opening { id: delta_id, val: -o_slot.val, blinding: random_blinding() };
+    let zeroed = commit(&pp, &o_slot) + commit(&pp, &o_delta);
+    // The only opening the prover has: the two added together.
+    let o_zeroed = Opening {
+        id: o_slot.id + o_delta.id,
+        val: o_slot.val + o_delta.val,
+        blinding: o_slot.blinding + o_delta.blinding,
+    };
+    let x = ctx(2, VALUE, 5);
+    TxVerProof::prove(&pp, &c_ref, &zeroed, Scalar::ZERO, &o_ref, &o_zeroed, &x)
+        .verify(&pp, &c_ref, &zeroed, Scalar::ZERO, &x)
+}
+
+#[test]
+fn delta_with_identity_doubles_it() {
+    // c_delta = Com(id, -v_k): slot + c_delta = Com(2*id, 0), not alice's.
+    assert!(!zero_slot_with(alice()));
+}
+
+#[test]
+fn delta_without_identity_zeroes_the_slot() {
+    // c_delta = Com(0, -v_k): slot + c_delta = Com(id, 0), alice's, value 0.
+    assert!(zero_slot_with(Scalar::ZERO));
+}
+
+#[test]
+fn stage3_does_not_check_identity() {
+    // A c_new that belongs to bob still passes the hidden sum: Π.VEq ignores g_iden.
+    // c_new's identity is bound by Π.TxVer in Stage 2 or not at all.
+    let pp = PublicParams::setup();
+    let (cs, os) = alices(&pp, &[100, 250, 75, 300]);
+    let (mut outs, mut oos) = rerand_all(&pp, &cs, &os);
+    let o_new = Opening { id: hash_identity(b"bob"), val: Scalar::ZERO, blinding: random_blinding() };
+    outs.push(commit(&pp, &o_new));
+    oos.push(o_new);
+    assert!(stage3(&pp, &outs, &oos).0);
+}
