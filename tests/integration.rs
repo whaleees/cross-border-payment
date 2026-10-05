@@ -6,6 +6,7 @@
 use curve25519_dalek::Scalar;
 
 use ibc::commitment::{Commitment, Opening, commit, random_blinding, rerand};
+use ibc::ctx::RoundCtx;
 use ibc::fulleq::FullEqProof;
 use ibc::ideq::IdEqProof;
 use ibc::mideq::MIDEqProof;
@@ -13,6 +14,11 @@ use ibc::params::{PublicParams, hash_identity, value_to_scalar};
 use ibc::txver::TxVerProof;
 use ibc::veq::VEqProof;
 use ibc::vver::VVerProof;
+
+const ROUND_A: [u8; 32] = [0xA; 32];
+const ROUND_B: [u8; 32] = [0xB; 32];
+const VALUE: u8 = 0;
+const AGE: u8 = 1;
 
 fn alice() -> Scalar {
     hash_identity(b"alice")
@@ -54,4 +60,29 @@ fn lemma3_needs_the_new_opening() {
     let c_out = rerand(&pp, &commit(&pp, &o), &random_blinding());
     let x = b"lemma3";
     assert!(!VVerProof::prove(&pp, &c_out, o.val, &o, x).verify(&pp, &c_out, o.val, x));
+}
+
+// ---- Step 03: the round ctx --------------------------------------------------
+
+#[test]
+fn proof_does_not_move_between_rounds_stages_vectors_or_slots() {
+    let pp = PublicParams::setup();
+    let (c_ref, o_ref) = registration(&pp);
+    let o_new = Opening { id: alice(), val: Scalar::ZERO, blinding: random_blinding() };
+    let c_new = commit(&pp, &o_new);
+    let here = RoundCtx { round_id: ROUND_A, stage: 2, vector: VALUE, slot: 5, prev: [0; 32] };
+
+    let proof = TxVerProof::prove(&pp, &c_ref, &c_new, Scalar::ZERO, &o_ref, &o_new, &here.to_bytes());
+    assert!(proof.verify(&pp, &c_ref, &c_new, Scalar::ZERO, &here.to_bytes()));
+
+    // Same statement, any other ctx: rejected.
+    for other in [
+        RoundCtx { round_id: ROUND_B, ..here },
+        RoundCtx { stage: 3, ..here },
+        RoundCtx { vector: AGE, ..here },
+        RoundCtx { slot: 4, ..here },
+        RoundCtx { prev: [1; 32], ..here },
+    ] {
+        assert!(!proof.verify(&pp, &c_ref, &c_new, Scalar::ZERO, &other.to_bytes()));
+    }
 }
