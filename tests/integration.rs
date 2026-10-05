@@ -70,6 +70,22 @@ fn sum_opening(os: &[Opening]) -> Opening {
     }
 }
 
+// Stage 0: one Π.MIDEq over (c_ref, c_1..c_N).
+fn stage0(
+    pp: &PublicParams,
+    reference: (&Commitment, &Opening),
+    cs: &[Commitment],
+    os: &[Opening],
+    vector: u8,
+) -> bool {
+    let mut all_c = vec![*reference.0];
+    all_c.extend_from_slice(cs);
+    let mut all_o = vec![*reference.1];
+    all_o.extend_from_slice(os);
+    let x = ctx(0, vector, 0);
+    MIDEqProof::prove(pp, &all_c, &all_o, &x).verify(pp, &all_c, &x)
+}
+
 // Stage 3: c_ST = ST*g_val + r_s*g_ran and one Π.VEq(c_sum, c_ST).
 // Returns the verdict and the hidden total that Stage 4's range proof would check.
 fn stage3(pp: &PublicParams, outs: &[Commitment], oos: &[Opening]) -> (bool, Scalar) {
@@ -299,4 +315,91 @@ fn stage3_does_not_check_identity() {
     outs.push(commit(&pp, &o_new));
     oos.push(o_new);
     assert!(stage3(&pp, &outs, &oos).0);
+}
+
+// ---- Step 06: the IBC side of a whole round, and its limits -----------------------
+
+#[test]
+fn round_b_ibc_side_accepts() {
+    let pp = PublicParams::setup();
+    let (c_ref, o_ref) = registration(&pp);
+    // The last slot holds the expired transaction once the second shuffle is done.
+    let (cs, os) = alices(&pp, &[100, 250, 75, 300, 9_000]);
+    let (ages, oages) = alices(&pp, &[1, 2, 3, 4, 14]);
+    let last = cs.len() - 1;
+    let n = cs.len() as u32;
+
+    // Stage 0: both vectors bound to c_ref.
+    assert!(stage0(&pp, (&c_ref, &o_ref), &cs, &os, VALUE));
+    assert!(stage0(&pp, (&c_ref, &o_ref), &ages, &oages, AGE));
+
+    // Stages 1-2 re-randomise. The permutations are Azka's; IBC only needs ReRand.
+    let (outs, oos) = rerand_all(&pp, &cs, &os);
+    let (age_outs, oage_outs) = rerand_all(&pp, &ages, &oages);
+
+    // Stage 2: bridge the target's age to a two-basis copy for the age gate.
+    let o_tilde = two_basis(oage_outs[last].val);
+    let c_tilde = commit(&pp, &o_tilde);
+    let x_br = ctx(2, AGE, n);
+    let p_br = VEqProof::prove(&pp, &age_outs[last], &c_tilde, &oage_outs[last], &o_tilde, &x_br);
+    assert!(p_br.verify(&pp, &age_outs[last], &c_tilde, &x_br));
+
+    // Stage 2: c_new = Com(id, 0), bound to c_ref by Π.TxVer with v' = 0.
+    let o_new = Opening { id: alice(), val: Scalar::ZERO, blinding: random_blinding() };
+    let c_new = commit(&pp, &o_new);
+    let x_tx = ctx(2, VALUE, n);
+    let p_tx = TxVerProof::prove(&pp, &c_ref, &c_new, Scalar::ZERO, &o_ref, &o_new, &x_tx);
+    assert!(p_tx.verify(&pp, &c_ref, &c_new, Scalar::ZERO, &x_tx));
+
+    // Stage 3: the sum with the last slot replaced by c_new.
+    let mut summed = outs[..last].to_vec();
+    summed.push(c_new);
+    let mut summed_o = oos[..last].to_vec();
+    summed_o.push(o_new);
+    let (ok, total) = stage3(&pp, &summed, &summed_o);
+    assert!(ok);
+    assert_eq!(total, value_to_scalar(725)); // the expired 9 000 is not counted
+}
+
+#[test]
+fn limitation_an_omitted_transaction_goes_unnoticed() {
+    // alice really made [100, 250, 75, 9 000, 40]; she submits the set without 9 000.
+    let pp = PublicParams::setup();
+    let (c_ref, o_ref) = registration(&pp);
+    let (cs, os) = alices(&pp, &[100, 250, 75, 40]);
+    assert!(stage0(&pp, (&c_ref, &o_ref), &cs, &os, VALUE));
+    let (outs, oos) = rerand_all(&pp, &cs, &os);
+    let (ok, total) = stage3(&pp, &outs, &oos);
+    assert!(ok);
+    assert_eq!(total, value_to_scalar(465)); // the 9 000 never entered the sum
+}
+
+#[test]
+fn limitation_ages_can_be_paired_with_the_wrong_transaction() {
+    // Honest: the 9 000 payment is 1 month old, the 100 payment 14 months old.
+    // alice commits the ages swapped, so the 9 000 payment looks expired.
+    let pp = PublicParams::setup();
+    let (c_ref, o_ref) = registration(&pp);
+    let (cs, os) = alices(&pp, &[9_000, 100]);
+    let (ages, oages) = alices(&pp, &[14, 1]); // swapped
+    assert!(stage0(&pp, (&c_ref, &o_ref), &cs, &os, VALUE));
+    assert!(stage0(&pp, (&c_ref, &o_ref), &ages, &oages, AGE));
+}
+
+#[test]
+fn limitation_a_negative_value_lowers_the_hidden_sum() {
+    // Scalars are mod p, so -7 000 (that is, p - 7 000) is a valid amount. The
+    // total lands inside [0, B] although the real volume is 8 000.
+    let pp = PublicParams::setup();
+    let (c_ref, o_ref) = registration(&pp);
+    let (mut cs, mut os) = alices(&pp, &[5_000, 3_000]);
+    let o_neg = Opening { id: alice(), val: -value_to_scalar(7_000), blinding: random_blinding() };
+    cs.push(commit(&pp, &o_neg));
+    os.push(o_neg);
+
+    assert!(stage0(&pp, (&c_ref, &o_ref), &cs, &os, VALUE));
+    let (outs, oos) = rerand_all(&pp, &cs, &os);
+    let (ok, total) = stage3(&pp, &outs, &oos);
+    assert!(ok);
+    assert_eq!(total, value_to_scalar(1_000));
 }
