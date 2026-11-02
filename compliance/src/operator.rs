@@ -51,6 +51,11 @@ impl NullifierSet {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    // Read only, for saving a set to disk in the experiments (examples/compare.rs).
+    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter()
+    }
 }
 
 // One verifier as the operator lists it: its key number, its public key, and its
@@ -109,7 +114,12 @@ pub struct Operator {
 
 impl Operator {
     pub fn new() -> Self {
-        Operator { sk: SigningKey::generate(&mut OsRng), verifiers: Vec::new(), ns: NullifierSet::default() }
+        Self::with_key(SigningKey::generate(&mut OsRng))
+    }
+
+    // An operator with a key it had before, e.g. reloaded with a saved experiment.
+    pub fn with_key(sk: SigningKey) -> Self {
+        Operator { sk, verifiers: Vec::new(), ns: NullifierSet::default() }
     }
 
     pub fn public_key(&self) -> VerifyingKey {

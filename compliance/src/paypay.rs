@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use curve25519_dalek::Scalar;
-use curve25519_dalek::ristretto::CompressedRistretto;
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoBasepointTable};
 use ed25519_dalek::VerifyingKey;
 use ibc::commitment::{Commitment, Opening, commit, random_blinding};
 use ibc::fulleq::FullEqProof;
@@ -12,6 +12,8 @@ use ibc::veq::VEqProof;
 use rand_core::{OsRng, RngCore};
 
 use crate::ctx::{BOTH, DATE, Round, STAGE_DOMESTIC, STAGE_EXPIRY, STAGE_MIDEQ, STAGE_NEW_PAIR, STAGE_SHUFFLE, STAGE_TAG, STAGE_TOTAL, VALUE};
+use crate::hash::compress;
+use crate::level::{Level, mideq_old};
 use crate::operator::{Registry, SignedRegistry};
 use crate::package::{Package, Proofs, RoundData, Start, statement};
 use crate::params::{Params, ShuffleKey, window_start};
@@ -43,10 +45,20 @@ impl Record {
     }
 }
 
+// See PayPay::export_account.
+pub struct SavedAccount {
+    pub id: Scalar,
+    pub list: Vec<Record>, // in the order the token signed
+    pub token: StateToken,
+    pub rho: [u8; 32],
+}
+
 #[derive(Clone)]
 struct Account {
     id: Scalar,
     list: Vec<Record>,                     // last front, in the signed order
+    list_c: Vec<CompressedRistretto>,      // the same front compressed, as signed (A3)
+    list_d: Vec<CompressedRistretto>,
     token: Option<(StateToken, [u8; 32])>, // last state token and its rho
     domestic: Vec<Record>,                 // domestic payments not yet in the list
 }
@@ -89,7 +101,9 @@ pub enum Refusal {
 #[derive(Clone)]
 pub struct PayPay {
     k_p: [u8; 32],
+    level: Level,
     params: Params,
+    g_ran_table: RistrettoBasepointTable, // for the 2N re-randomisations (A2)
     registry: Registry,
     range_key: RangeKey,
     accounts: HashMap<User, Account>,
@@ -115,7 +129,9 @@ impl PayPay {
         let params = Params::setup();
         Some(PayPay {
             k_p,
+            level: Level::LATEST,
             params,
+            g_ran_table: RistrettoBasepointTable::create(&params.pp.g_ran),
             registry: signed.registry.clone(),
             range_key: RangeKey::new(&params.pp, 4),
             accounts: HashMap::new(),
@@ -124,10 +140,17 @@ impl PayPay {
         })
     }
 
+    // Run an earlier level of decision 35, for the comparison in examples/compare.rs.
+    pub fn with_level(mut self, level: Level) -> Self {
+        self.level = level;
+        self
+    }
+
     // G0 step 14: id = hash_identity(k_P || KYC data), so nobody else can compute it.
     pub fn register(&mut self, user: User, kyc: &[u8]) {
         let id = hash_identity(&[&self.k_p[..], kyc].concat());
-        self.accounts.insert(user, Account { id, list: Vec::new(), token: None, domestic: Vec::new() });
+        let acct = Account { id, list: Vec::new(), list_c: Vec::new(), list_d: Vec::new(), token: None, domestic: Vec::new() };
+        self.accounts.insert(user, acct);
     }
 
     // G1: a domestic payment, committed now, inserted at the next cross-border round.
@@ -151,6 +174,21 @@ impl PayPay {
 
     pub fn list(&self, user: User) -> &[Record] {
         &self.accounts[&user].list
+    }
+
+    // A user's account after an approved round, with nothing waiting: for experiments
+    // that keep a long history on disk instead of rebuilding it (examples/compare.rs).
+    pub fn export_account(&self, user: User) -> Option<SavedAccount> {
+        let acct = self.accounts.get(&user)?;
+        let (token, rho) = acct.token?;
+        acct.domestic.is_empty().then(|| SavedAccount { id: acct.id, list: acct.list.clone(), token, rho })
+    }
+
+    pub fn import_account(&mut self, user: User, saved: SavedAccount) {
+        let list_c = compress(&saved.list.iter().map(|r| r.c).collect::<Vec<_>>());
+        let list_d = compress(&saved.list.iter().map(|r| r.d).collect::<Vec<_>>());
+        let token = Some((saved.token, saved.rho));
+        self.accounts.insert(user, Account { id: saved.id, list: saved.list, list_c, list_d, token, domestic: Vec::new() });
     }
 
     // G3 steps 5-11, G4, G5 (G8 for a first payment). Today is PayPay's own clock.
@@ -230,12 +268,15 @@ impl PayPay {
         let rerand = |_| if n == 1 { Scalar::ZERO } else { random_blinding() };
         let delta: Vec<Scalar> = (0..n).map(rerand).collect();
         let eta: Vec<Scalar> = (0..n).map(rerand).collect();
+        // Decision 35, A2: g_ran is fixed, so from level A2 on its precomputed table
+        // replaces the variable-base multiplication. Both run in constant time.
+        let times_g_ran = |s: &Scalar| if self.level >= Level::A2 { s * &self.g_ran_table } else { s * pp.g_ran };
         let outputs: Vec<Record> = (0..n)
             .map(|j| {
                 let src = inputs[perm[j]];
                 Record {
-                    c: Commitment(src.c.0 + delta[j] * pp.g_ran),
-                    d: Commitment(src.d.0 + eta[j] * pp.g_ran),
+                    c: Commitment(src.c.0 + times_g_ran(&delta[j])),
+                    d: Commitment(src.d.0 + times_g_ran(&eta[j])),
                     r: src.r + delta[j],
                     s: src.s + eta[j],
                     ..src
@@ -281,7 +322,15 @@ impl PayPay {
             e: e as u32,
             v_s,
         };
-        let enc = data.encode(); // every list compressed once (decision 34)
+        // Every list compressed once (decision 34). From level A3 on (decision 35) the
+        // old list is not compressed even once: its bytes are kept from the round
+        // whose token signed them.
+        let enc = if self.level >= Level::A3 {
+            let acct = &self.accounts[&user];
+            data.encode_with_old(acct.list_c.clone(), acct.list_d.clone())
+        } else {
+            data.encode()
+        };
         let round = Round { round_id: x.round_id, stmt: statement(x, &data, &enc) };
 
         // G: the proofs.
@@ -292,6 +341,7 @@ impl PayPay {
         };
 
         let mideq = (!old.is_empty() || !domestic.is_empty()).then(|| {
+            let old = mideq_old(self.level, &old);
             let cs: Vec<Commitment> = [x.tid].into_iter().chain(old.iter().chain(&domestic).map(|r| r.c)).collect();
             let os: Vec<Opening> = [o_tid].into_iter().chain(old.iter().chain(&domestic).map(|r| r.opening(id))).collect();
             MIDEqProof::prove(&pp, &cs, &os, &round.ctx(STAGE_MIDEQ, VALUE, 0))
@@ -328,7 +378,7 @@ impl PayPay {
             let (c_in, d_in) = data.inputs();
             let (ec_in, ed_in) = enc.inputs();
             let encoded = [&ec_in[..], &ed_in, &enc.c_out, &enc.d_out];
-            ShuffleProof::prove(&key, &pp, grid, &c_in, &d_in, &data.c_out, &data.d_out, encoded, &perm, &delta, &eta, &round.ctx(STAGE_SHUFFLE, BOTH, 0))
+            ShuffleProof::prove(&key, &pp, grid, &c_in, &d_in, &data.c_out, &data.d_out, encoded, &perm, &delta, &eta, &round.ctx(STAGE_SHUFFLE, BOTH, 0), self.level)
         });
 
         let expiry = (e > 0).then(|| {
@@ -375,6 +425,7 @@ impl PayPay {
         let p = self.pending.remove(round_id).expect("checked above");
         let acct = self.accounts.get_mut(&p.user).expect("registered user");
         acct.list = p.front; // the tail is dropped here
+        (acct.list_c, acct.list_d) = (p.front_c, p.front_d);
         acct.token = Some((token, p.rho_next));
         acct.domestic.drain(..p.domestic_used);
         true
@@ -429,6 +480,14 @@ mod tests {
         let (cs, ds) = enc.front(pkg.data.e);
         let token = StateToken::issue(sk, req.x.kid, cs, ds, pkg.data.cm_next);
         w.paypay.accept(&req.x.round_id, token)
+    }
+
+    #[test]
+    fn the_g_ran_table_gives_the_same_points() {
+        // Decision 35, A2 changes how fast PayPay multiplies by g_ran, not the result.
+        let w = world();
+        let s = random_blinding();
+        assert_eq!(&s * &w.paypay.g_ran_table, s * w.paypay.params.pp.g_ran);
     }
 
     #[test]
@@ -544,7 +603,7 @@ mod tests {
         let (ec_in, ed_in) = enc.inputs();
         let encoded = [&ec_in[..], &ed_in, &enc.c_out, &enc.d_out];
         let shuffle = pkg2.proofs.shuffle.as_ref().unwrap();
-        assert!(shuffle.verify(&ShuffleKey::new(&pp, grid.n), &pp, grid, &c_in, &d_in, &pkg2.data.c_out, &pkg2.data.d_out, encoded, &round.ctx(STAGE_SHUFFLE, BOTH, 0)));
+        assert!(shuffle.verify(&ShuffleKey::new(&pp, grid.n), &pp, grid, &c_in, &d_in, &pkg2.data.c_out, &pkg2.data.d_out, encoded, &round.ctx(STAGE_SHUFFLE, BOTH, 0), Level::LATEST));
         let key = RangeKey::new(&pp, 4);
         let expiry = pkg2.proofs.expiry.as_ref().unwrap();
         assert!(verify_expired(&key, 20_036, pkg2.data.tail_dates(), expiry, &round.ctx(STAGE_EXPIRY, DATE, 0)));

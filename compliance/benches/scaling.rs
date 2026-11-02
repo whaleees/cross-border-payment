@@ -2,6 +2,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use compliance::hash::compress;
+use compliance::level::Level;
 use compliance::operator::{NullifierSet, Operator};
 use compliance::params::{Params, ShuffleKey};
 use compliance::paypay::{PayPay, User};
@@ -51,12 +52,12 @@ fn encoded(s: &Shuffled) -> [Vec<CompressedRistretto>; 4] {
 
 fn prove(pp: &PublicParams, key: &ShuffleKey, grid: Grid, s: &Shuffled) -> ShuffleProof {
     let enc = encoded(s);
-    ShuffleProof::prove(key, pp, grid, &s.c_in, &s.d_in, &s.c_out, &s.d_out, enc.each_ref().map(Vec::as_slice), &s.perm, &s.delta, &s.eta, CTX)
+    ShuffleProof::prove(key, pp, grid, &s.c_in, &s.d_in, &s.c_out, &s.d_out, enc.each_ref().map(Vec::as_slice), &s.perm, &s.delta, &s.eta, CTX, Level::LATEST)
 }
 
 fn verify(pp: &PublicParams, key: &ShuffleKey, grid: Grid, s: &Shuffled, p: &ShuffleProof) -> bool {
     let enc = encoded(s);
-    p.verify(key, pp, grid, &s.c_in, &s.d_in, &s.c_out, &s.d_out, enc.each_ref().map(Vec::as_slice), CTX)
+    p.verify(key, pp, grid, &s.c_in, &s.d_in, &s.c_out, &s.d_out, enc.each_ref().map(Vec::as_slice), CTX, Level::LATEST)
 }
 
 // The shuffle alone: by N at the protocol's grid, then by m at N = 1,000 (decision 18f).

@@ -1,6 +1,7 @@
 use std::hint::black_box;
 
 use compliance::hash::compress;
+use compliance::level::Level;
 use compliance::params::{Params, ShuffleKey};
 use compliance::range::{Opened, RangeKey, prove_amounts, prove_expired, verify_amounts, verify_expired};
 use compliance::shuffle::{Grid, ShuffleProof};
@@ -74,14 +75,14 @@ fn components(c: &mut Criterion) {
     let encoded = || [compress(&c_in), compress(&d_in), compress(&c_out), compress(&d_out)];
     let prove = || {
         let enc = encoded();
-        ShuffleProof::prove(&skey, &pp, grid, &c_in, &d_in, &c_out, &d_out, enc.each_ref().map(Vec::as_slice), &perm, &delta, &eta, CTX)
+        ShuffleProof::prove(&skey, &pp, grid, &c_in, &d_in, &c_out, &d_out, enc.each_ref().map(Vec::as_slice), &perm, &delta, &eta, CTX, Level::LATEST)
     };
     let ps = prove();
     g.bench_function("shuffle_n100_prove", |b| b.iter(|| black_box(prove())));
     g.bench_function("shuffle_n100_verify", |b| {
         b.iter(|| {
             let enc = encoded();
-            assert!(black_box(&ps).verify(&skey, &pp, grid, &c_in, &d_in, &c_out, &d_out, enc.each_ref().map(Vec::as_slice), CTX))
+            assert!(black_box(&ps).verify(&skey, &pp, grid, &c_in, &d_in, &c_out, &d_out, enc.each_ref().map(Vec::as_slice), CTX, Level::LATEST))
         })
     });
 

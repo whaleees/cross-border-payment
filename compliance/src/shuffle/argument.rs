@@ -7,10 +7,11 @@ use ibc::commitment::{Commitment, random_blinding};
 use ibc::params::PublicParams;
 use merlin::Transcript;
 
-use super::multiexp::{self, MultiExpFirst, MultiExpResponse};
+use super::multiexp::{self, Checked, MultiExpFirst, MultiExpResponse};
 use super::product::{self, ProductFirst, ProductResponse, ProductSecond};
 use super::{Grid, com_v};
 use crate::hash::compress;
+use crate::level::Level;
 use crate::params::ShuffleKey;
 
 // S1, the shuffle argument (shuffle_argument.md section 3). For lists of N pairs:
@@ -77,8 +78,24 @@ fn append_move_7(t: &mut Transcript, ps: &ProductSecond, mf: &MultiExpFirst) {
     }
     append_points(t, b"svp", &[ps.svp.c_d, ps.svp.c_delta, ps.svp.c_gamma]);
     append_points(t, b"me", &[mf.c_a0]);
-    append_points(t, b"me_c", &mf.e_c);
-    append_points(t, b"me_d", &mf.e_d);
+    let labels: &[&'static [u8]] = if mf.e.len() == 1 { &[b"me_w"] } else { &[b"me_c", b"me_d"] };
+    for (label, es) in labels.iter().zip(&mf.e) {
+        append_points(t, label, es);
+    }
+}
+
+// Decision 35, B2: one challenge lambda, drawn after c_A and so after the permutation
+// is fixed, folds the two lists into W = C + lambda*D, and S6 runs once, on W. If W_out
+// is W_in shuffled with one permutation for two different lambdas, then so are C and D
+// on their own, and with the same permutation; that is why lambda must come after c_A.
+// Before B2, S6 runs on C and D separately (decision 30).
+fn draw_lambda(t: &mut Transcript, level: Level) -> Option<Scalar> {
+    (level >= Level::B2).then(|| challenge(t, b"lambda"))
+}
+
+// W's points, which S6's prover needs: lambda and D are public, so variable time.
+fn combine(c: &[RistrettoPoint], d: &[RistrettoPoint], lambda: Scalar) -> Vec<RistrettoPoint> {
+    c.iter().zip(d).map(|(c, d)| c + RistrettoPoint::vartime_multiscalar_mul([lambda], [d])).collect()
 }
 
 fn points(cs: &[Commitment]) -> Vec<RistrettoPoint> {
@@ -125,6 +142,7 @@ impl ShuffleProof {
         delta: &[Scalar],
         eta: &[Scalar],
         ctx: &[u8],
+        level: Level,
     ) -> Self {
         let n_real = c_in.len();
         assert!(d_in.len() == n_real && c_out.len() == n_real && d_out.len() == n_real);
@@ -145,6 +163,7 @@ impl ShuffleProof {
         let c_a: Vec<RistrettoPoint> = grid.rows(&a).iter().zip(&r_a).map(|(row, r)| com_v(key, row, r)).collect();
         append_points(&mut t, b"c_a", &c_a);
         let x = challenge(&mut t, b"x");
+        let lambda = draw_lambda(&mut t, level);
 
         // Steps 4-5: commit to x^(position).
         let xp = powers(x, big_n + 1);
@@ -170,9 +189,17 @@ impl ShuffleProof {
         let (product_second, pst2) = product::commit_second(pst, key, x_h, y_h);
         let kappa_c = -b.iter().zip(&delta).map(|(bj, dj)| bj * dj).sum::<Scalar>(); // step 9
         let kappa_d = -b.iter().zip(&eta).map(|(bj, hj)| bj * hj).sum::<Scalar>();
-        let c_rows = grid.rows(&padded(c_out, big_n));
-        let d_rows = grid.rows(&padded(d_out, big_n));
-        let (multiexp_first, mst) = multiexp::commit(key, &pp.g_ran, &c_rows, &d_rows, &b_rows, &s_b, kappa_c, kappa_d);
+        let (c_pad, d_pad) = (padded(c_out, big_n), padded(d_out, big_n));
+        let (multiexp_first, mst) = match lambda {
+            None => {
+                let (c_rows, d_rows) = (grid.rows(&c_pad), grid.rows(&d_pad));
+                multiexp::commit(key, &pp.g_ran, &[(&c_rows[..], kappa_c), (&d_rows[..], kappa_d)], &b_rows, &s_b, level)
+            }
+            Some(l) => {
+                let w_rows = grid.rows(&combine(&c_pad, &d_pad, l));
+                multiexp::commit(key, &pp.g_ran, &[(&w_rows[..], kappa_c + l * kappa_d)], &b_rows, &s_b, level)
+            }
+        };
         append_move_7(&mut t, &product_second, &multiexp_first);
         let e = challenge(&mut t, b"e");
 
@@ -201,6 +228,7 @@ impl ShuffleProof {
         d_out: &[Commitment],
         encoded: [&[CompressedRistretto]; 4],
         ctx: &[u8],
+        level: Level,
     ) -> bool {
         let n_real = c_in.len();
         if n_real < 2 || d_in.len() != n_real || c_out.len() != n_real || d_out.len() != n_real {
@@ -219,6 +247,7 @@ impl ShuffleProof {
         let mut t = start(ctx, grid, encoded);
         append_points(&mut t, b"c_a", &self.c_a);
         let x = challenge(&mut t, b"x");
+        let lambda = draw_lambda(&mut t, level);
         append_points(&mut t, b"c_b", &self.c_b);
         let y = challenge(&mut t, b"y");
         let z = challenge(&mut t, b"z");
@@ -241,8 +270,15 @@ impl ShuffleProof {
         // 17.
         let c_rows = grid.rows(&padded(c_out, big_n));
         let d_rows = grid.rows(&padded(d_out, big_n));
+        let lists = match lambda {
+            None => vec![
+                Checked { parts: vec![(&c_rows[..], Scalar::ONE)], y: y_c },
+                Checked { parts: vec![(&d_rows[..], Scalar::ONE)], y: y_d },
+            ],
+            Some(l) => vec![Checked { parts: vec![(&c_rows[..], Scalar::ONE), (&d_rows[..], l)], y: y_c + l * y_d }],
+        };
         product::check(key, grid.n, &c_w, beta, &self.product_first, x_h, y_h, &self.product_second, &self.product_resp, e)
-            && multiexp::check(key, &pp.g_ran, &c_rows, &d_rows, &self.c_b, &y_c, &y_d, &self.multiexp_first, &self.multiexp_resp, e)
+            && multiexp::check(key, &pp.g_ran, &lists, &self.c_b, &self.multiexp_first, &self.multiexp_resp, e)
     }
 }
 
@@ -296,14 +332,22 @@ mod tests {
         [compress(&s.c_in), compress(&s.d_in), compress(&s.c_out), compress(&s.d_out)]
     }
 
-    fn prove(s: &Shuffled, grid: Grid, key: &ShuffleKey) -> ShuffleProof {
+    fn prove_at(s: &Shuffled, grid: Grid, key: &ShuffleKey, level: Level) -> ShuffleProof {
         let enc = encoded(s);
-        ShuffleProof::prove(key, &s.pp, grid, &s.c_in, &s.d_in, &s.c_out, &s.d_out, enc.each_ref().map(Vec::as_slice), &s.perm, &s.delta, &s.eta, CTX)
+        ShuffleProof::prove(key, &s.pp, grid, &s.c_in, &s.d_in, &s.c_out, &s.d_out, enc.each_ref().map(Vec::as_slice), &s.perm, &s.delta, &s.eta, CTX, level)
+    }
+
+    fn prove(s: &Shuffled, grid: Grid, key: &ShuffleKey) -> ShuffleProof {
+        prove_at(s, grid, key, Level::LATEST)
+    }
+
+    fn verify_at(p: &ShuffleProof, s: &Shuffled, grid: Grid, key: &ShuffleKey, ctx: &[u8], level: Level) -> bool {
+        let enc = encoded(s);
+        p.verify(key, &s.pp, grid, &s.c_in, &s.d_in, &s.c_out, &s.d_out, enc.each_ref().map(Vec::as_slice), ctx, level)
     }
 
     fn verify(p: &ShuffleProof, s: &Shuffled, grid: Grid, key: &ShuffleKey, ctx: &[u8]) -> bool {
-        let enc = encoded(s);
-        p.verify(key, &s.pp, grid, &s.c_in, &s.d_in, &s.c_out, &s.d_out, enc.each_ref().map(Vec::as_slice), ctx)
+        verify_at(p, s, grid, key, ctx, Level::LATEST)
     }
 
     #[test]
@@ -315,6 +359,42 @@ mod tests {
             let key = ShuffleKey::new(&s.pp, grid.n);
             let p = prove(&s, grid, &key);
             assert!(verify(&p, &s, grid, &key, CTX), "N = {n}, grid {grid:?}");
+        }
+    }
+
+    #[test]
+    fn every_level_proves_what_a_verifier_at_that_level_accepts() {
+        let s = shuffled(257);
+        let grid = Grid::for_len(257);
+        let key = ShuffleKey::new(&s.pp, grid.n);
+        for level in Level::ALL {
+            let p = prove_at(&s, grid, &key, level);
+            assert!(verify_at(&p, &s, grid, &key, CTX, level), "{level:?}");
+        }
+    }
+
+    #[test]
+    fn b2_and_earlier_shuffle_proofs_do_not_pass_for_each_other() {
+        // B2 draws one more challenge and sends one list of diagonals instead of two.
+        let s = shuffled(64);
+        let grid = Grid::for_len(64);
+        let key = ShuffleKey::new(&s.pp, grid.n);
+        let (old, new) = (prove_at(&s, grid, &key, Level::B1), prove_at(&s, grid, &key, Level::B2));
+        assert!(!verify_at(&old, &s, grid, &key, CTX, Level::B2));
+        assert!(!verify_at(&new, &s, grid, &key, CTX, Level::B1));
+    }
+
+    #[test]
+    fn at_b2_dates_moved_differently_from_amounts_still_fail() {
+        // The attack the second list's own check caught before B2: one combined check
+        // must catch it too, for both a big and a one-row grid.
+        for (n, m) in [(64, 8), (10, 1)] {
+            let mut s = shuffled(n);
+            let grid = Grid::with_rows(n, m);
+            let key = ShuffleKey::new(&s.pp, grid.n);
+            s.d_out.swap(0, 1);
+            let p = prove_at(&s, grid, &key, Level::B2);
+            assert!(!verify_at(&p, &s, grid, &key, CTX, Level::B2), "m = {m}");
         }
     }
 
@@ -397,14 +477,16 @@ mod tests {
 
     #[test]
     fn sizes_match_the_formulas() {
-        // m >= 2: 32*(9m + 5n + 11) bytes. m = 1: 32*(3n + 13), the shape of the
-        // single-row prototype measured in experiment/bench_shuffle.
+        // Before B2, m >= 2: 32*(9m + 5n + 11) bytes. m = 1: 32*(3n + 13), the shape of
+        // the single-row prototype measured in experiment/bench_shuffle. From B2 on one
+        // list of 2m - 1 diagonals and one tau fewer: 32*(7m + 5n + 11) and 32*(3n + 11).
         let s = shuffled(257);
         let grid = Grid::for_len(257); // 16 x 17
-        let key = ShuffleKey::new(&s.pp, 257);
-        assert_eq!(prove(&s, grid, &key).size_bytes(), 32 * (9 * 16 + 5 * 17 + 11));
-
         let one = Grid::with_rows(257, 1);
-        assert_eq!(prove(&s, one, &key).size_bytes(), 32 * (3 * 257 + 13));
+        let key = ShuffleKey::new(&s.pp, 257);
+        assert_eq!(prove_at(&s, grid, &key, Level::B1).size_bytes(), 32 * (9 * 16 + 5 * 17 + 11));
+        assert_eq!(prove_at(&s, one, &key, Level::B1).size_bytes(), 32 * (3 * 257 + 13));
+        assert_eq!(prove_at(&s, grid, &key, Level::B2).size_bytes(), 32 * (7 * 16 + 5 * 17 + 11));
+        assert_eq!(prove_at(&s, one, &key, Level::B2).size_bytes(), 32 * (3 * 257 + 11));
     }
 }

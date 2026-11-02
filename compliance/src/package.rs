@@ -130,9 +130,20 @@ impl RoundData {
     }
 
     pub fn encode(&self) -> Encoded {
+        self.encode_rest(compress(self.c_old()), compress(self.d_old()))
+    }
+
+    // encode(), with the old list already compressed: PayPay keeps those bytes from
+    // the round whose state token signed them (decision 35, A3).
+    pub fn encode_with_old(&self, c_old: Vec<CompressedRistretto>, d_old: Vec<CompressedRistretto>) -> Encoded {
+        debug_assert!(c_old == compress(self.c_old()) && d_old == compress(self.d_old()), "not this round's old list");
+        self.encode_rest(c_old, d_old)
+    }
+
+    fn encode_rest(&self, c_old: Vec<CompressedRistretto>, d_old: Vec<CompressedRistretto>) -> Encoded {
         Encoded {
-            c_old: compress(self.c_old()),
-            d_old: compress(self.d_old()),
+            c_old,
+            d_old,
             c_dom: compress(&self.c_dom),
             d_dom: compress(&self.d_dom),
             c_tx: self.c_tx.0.compress(),

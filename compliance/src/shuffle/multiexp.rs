@@ -5,17 +5,18 @@ use curve25519_dalek::{
 use ibc::commitment::random_blinding;
 
 use super::{com_v, com_v_public, msm_secret};
+use crate::level::Level;
 use crate::params::ShuffleKey;
 
-// S6, multi-exponentiation argument for two lists (Bayer-Groth section 4,
-// decisions 10 and 30). For output rows C_1..C_m and D_1..D_m and the rows b_i
-// committed in c_B:
-//   Y_C = sum_i <C_i, b_i> + kappa_C*g_ran   and   Y_D = sum_i <D_i, b_i> + kappa_D*g_ran
-// Picture the table <C_i, A_j> with A_0 a fresh mask and A_j = b_j. Its main diagonal
+// S6, multi-exponentiation argument (Bayer-Groth section 4, decisions 10 and 30).
+// For each list L of output rows L_1..L_m and the rows b_i committed in c_B:
+//   Y_L = sum_i <L_i, b_i> + kappa_L*g_ran
+// Picture the table <L_i, A_j> with A_0 a fresh mask and A_j = b_j. Its main diagonal
 // is the statement; the prover sends every other diagonal sum E_k (blinded along
 // g_ran) so that one challenge e checks the whole table at once.
-// Both lists use the same mask a_0 and the same opened a, hence the same b: the dates
-// are shuffled with exactly the permutation of the amounts.
+// The lists share the mask a_0 and the opened a, hence the same b: the dates are
+// shuffled with exactly the permutation of the amounts. Before level B2 the lists are
+// C and D (decision 30); from B2 on there is one, W = C + lambda*D (decision 35).
 //
 // 0-indexed: rows i = 0..m, columns j = 0..=m (A[0] = mask, A[j] = b[j-1]); the pair
 // (i, j) sits on diagonal k = m - 1 + j - i, k = 0..2m-1, main diagonal k = m.
@@ -23,42 +24,126 @@ use crate::params::ShuffleKey;
 #[derive(Clone, Debug)]
 pub struct MultiExpFirst {
     pub c_a0: RistrettoPoint,
-    pub e_c: Vec<RistrettoPoint>, // E_C,k for k = 0..2m-1, skipping k = m
-    pub e_d: Vec<RistrettoPoint>,
+    pub e: Vec<Vec<RistrettoPoint>>, // per list: E_k for k = 0..2m-1, skipping k = m
 }
 
 #[derive(Clone, Debug)]
 pub struct MultiExpResponse {
-    pub a: Vec<Scalar>, // sum_j e^j * A_j, shared by both lists
+    pub a: Vec<Scalar>, // sum_j e^j * A_j, shared by every list
     pub r: Scalar,
-    pub tau_c: Scalar,
-    pub tau_d: Scalar,
+    pub tau: Vec<Scalar>, // per list
 }
 
 pub struct MultiExpState {
     big_a: Vec<Vec<Scalar>>, // A_0 (mask), A_1..A_m = b
     r0: Scalar,
     s_b: Vec<Scalar>,
-    tau_c: Vec<Scalar>, // per diagonal, zero at k = m
-    tau_d: Vec<Scalar>,
-    kappa_c: Scalar,
-    kappa_d: Scalar,
+    taus: Vec<Vec<Scalar>>, // per list, per diagonal, zero at k = m
+    kappas: Vec<Scalar>,
+}
+
+// One list as the verifier checks it: its rows as a weighted sum of row sets, and its
+// target Y. C alone or D alone before B2; C with weight 1 plus D with weight lambda
+// from B2 on, so W is never added up point by point on the verifier's side.
+pub struct Checked<'a> {
+    pub parts: Vec<(&'a [Vec<RistrettoPoint>], Scalar)>,
+    pub y: RistrettoPoint,
 }
 
 impl MultiExpFirst {
     pub fn size_bytes(&self) -> usize {
-        32 * (1 + self.e_c.len() + self.e_d.len())
+        32 * (1 + self.e.iter().map(Vec::len).sum::<usize>())
     }
 }
 
 impl MultiExpResponse {
     pub fn size_bytes(&self) -> usize {
-        32 * (self.a.len() + 3)
+        32 * (self.a.len() + 1 + self.tau.len())
     }
 }
 
 fn powers(e: Scalar, count: usize) -> Vec<Scalar> {
     std::iter::successors(Some(Scalar::ONE), |p| Some(p * e)).take(count).collect()
+}
+
+// From this many rows on, Karatsuba needs fewer inner products than the table
+// itself: m + K(m) against m^2 (13 against 16 at m = 4, 10 against 9 at m = 3).
+const KARATSUBA_FROM: usize = 4;
+
+// Every diagonal k = 0..2m-1 without its blinding; the main one (k = m) is not used.
+// Below level A1 the table is computed diagonal by diagonal, as before decision 35.
+fn diagonals(rows: &[Vec<RistrettoPoint>], big_a: &[Vec<Scalar>], level: Level) -> Vec<RistrettoPoint> {
+    if level < Level::A1 || rows.len() < KARATSUBA_FROM {
+        diagonals_direct(rows, big_a)
+    } else {
+        diagonals_karatsuba(rows, big_a)
+    }
+}
+
+fn diagonals_direct(rows: &[Vec<RistrettoPoint>], big_a: &[Vec<Scalar>]) -> Vec<RistrettoPoint> {
+    let m = rows.len();
+    (0..2 * m).map(|k| if k == m { RistrettoPoint::identity() } else { diagonal(rows, big_a, k) }).collect()
+}
+
+// Decision 35, A1. The diagonals are the coefficients of the product of
+//   Q(X) = sum_i rows[i] X^(m-1-i)   and   P(X) = sum_j A[j] X^j,
+// so split off A[0] (m inner products), and multiply Q by the rest with Karatsuba:
+// three half-size products instead of four, joined by additions of public rows and
+// of scalars. 97 inner products at m = 16 instead of 256. Nothing is multiplied by
+// a small number, which costs as much as a full scalar in constant time; that is
+// why the Toom-Cook prover in identity-binding-commitment gained nothing.
+fn diagonals_karatsuba(rows: &[Vec<RistrettoPoint>], big_a: &[Vec<Scalar>]) -> Vec<RistrettoPoint> {
+    let m = rows.len();
+    let q: Vec<Vec<RistrettoPoint>> = rows.iter().rev().cloned().collect(); // q[t] = rows[m-1-t]
+    let mut out = vec![RistrettoPoint::identity(); 2 * m];
+    for (t, row) in q.iter().enumerate() {
+        out[t] += msm_secret(&big_a[0], row);
+    }
+    for (k, z) in karatsuba(&q, &big_a[1..]).into_iter().enumerate() {
+        out[k + 1] += z;
+    }
+    out
+}
+
+// Coefficients of sum_t q[t] X^t times sum_t a[t] X^t, pairing each point row with
+// a scalar row by an inner product. q and a have the same length L; 2L - 1 results.
+fn karatsuba(q: &[Vec<RistrettoPoint>], a: &[Vec<Scalar>]) -> Vec<RistrettoPoint> {
+    let len = q.len();
+    if len == 1 {
+        return vec![msm_secret(&a[0], &q[0])];
+    }
+    let h = len.div_ceil(2);
+    let (q_lo, q_hi) = q.split_at(h);
+    let (a_lo, a_hi) = a.split_at(h);
+    let z0 = karatsuba(q_lo, a_lo);
+    let z2 = karatsuba(q_hi, a_hi);
+    // The upper halves are one row shorter when len is odd: missing rows count as zero.
+    let q_sum: Vec<Vec<RistrettoPoint>> = (0..h)
+        .map(|t| match q_hi.get(t) {
+            Some(hi) => q_lo[t].iter().zip(hi).map(|(x, y)| x + y).collect(),
+            None => q_lo[t].clone(),
+        })
+        .collect();
+    let a_sum: Vec<Vec<Scalar>> = (0..h)
+        .map(|t| match a_hi.get(t) {
+            Some(hi) => a_lo[t].iter().zip(hi).map(|(x, y)| x + y).collect(),
+            None => a_lo[t].clone(),
+        })
+        .collect();
+    let z1 = karatsuba(&q_sum, &a_sum);
+
+    let zero = RistrettoPoint::identity();
+    let mut out = vec![zero; 2 * len - 1];
+    for (t, z) in z0.iter().enumerate() {
+        out[t] += z;
+    }
+    for (t, z) in z2.iter().enumerate() {
+        out[t + 2 * h] += z;
+    }
+    for (t, z) in z1.iter().enumerate() {
+        out[t + h] += z - z0[t] - z2.get(t).unwrap_or(&zero);
+    }
+    out
 }
 
 // Diagonal k without its blinding: sum of <rows[i], A[j]> over m - 1 + j - i = k,
@@ -73,21 +158,18 @@ fn diagonal(rows: &[Vec<RistrettoPoint>], big_a: &[Vec<Scalar>], k: usize) -> Ri
     msm_secret(&scalars, &points)
 }
 
-// Steps 1-2. c_rows, d_rows: the output lists cut into m rows of n; b, s_b: the rows
-// committed in c_B and their blindings.
-#[allow(clippy::too_many_arguments)]
+// Steps 1-2. lists: each list of outputs cut into m rows of n, with its kappa; b, s_b:
+// the rows committed in c_B and their blindings.
 pub fn commit(
     key: &ShuffleKey,
     g_ran: &RistrettoPoint,
-    c_rows: &[Vec<RistrettoPoint>],
-    d_rows: &[Vec<RistrettoPoint>],
+    lists: &[(&[Vec<RistrettoPoint>], Scalar)],
     b: &[Vec<Scalar>],
     s_b: &[Scalar],
-    kappa_c: Scalar,
-    kappa_d: Scalar,
+    level: Level,
 ) -> (MultiExpFirst, MultiExpState) {
-    let m = c_rows.len();
-    assert!(m >= 1 && d_rows.len() == m && b.len() == m && s_b.len() == m);
+    let m = b.len();
+    assert!(m >= 1 && s_b.len() == m && !lists.is_empty() && lists.iter().all(|(rows, _)| rows.len() == m));
     let n = b[0].len();
 
     let a0: Vec<Scalar> = (0..n).map(|_| random_blinding()).collect();
@@ -96,14 +178,16 @@ pub fn commit(
     let big_a: Vec<Vec<Scalar>> = std::iter::once(a0).chain(b.iter().cloned()).collect();
 
     let blind = |k: usize| if k == m { Scalar::ZERO } else { random_blinding() };
-    let tau_c: Vec<Scalar> = (0..2 * m).map(blind).collect();
-    let tau_d: Vec<Scalar> = (0..2 * m).map(blind).collect();
-
-    let off_main = (0..2 * m).filter(|&k| k != m);
-    let e_c = off_main.clone().map(|k| diagonal(c_rows, &big_a, k) + tau_c[k] * g_ran).collect();
-    let e_d = off_main.map(|k| diagonal(d_rows, &big_a, k) + tau_d[k] * g_ran).collect();
-
-    (MultiExpFirst { c_a0, e_c, e_d }, MultiExpState { big_a, r0, s_b: s_b.to_vec(), tau_c, tau_d, kappa_c, kappa_d })
+    let mut e = Vec::new();
+    let mut taus = Vec::new();
+    for (rows, _) in lists {
+        let tau: Vec<Scalar> = (0..2 * m).map(blind).collect();
+        let diag = diagonals(rows, &big_a, level);
+        e.push((0..2 * m).filter(|&k| k != m).map(|k| diag[k] + tau[k] * g_ran).collect());
+        taus.push(tau);
+    }
+    let kappas = lists.iter().map(|(_, kappa)| *kappa).collect();
+    (MultiExpFirst { c_a0, e }, MultiExpState { big_a, r0, s_b: s_b.to_vec(), taus, kappas })
 }
 
 // Step 3.
@@ -124,47 +208,48 @@ pub fn respond(st: MultiExpState, e: Scalar) -> MultiExpResponse {
     MultiExpResponse {
         a,
         r: st.r0 + st.s_b.iter().enumerate().map(|(j, s)| ep[j + 1] * s).sum::<Scalar>(),
-        tau_c: tau(&st.tau_c, st.kappa_c),
-        tau_d: tau(&st.tau_d, st.kappa_d),
+        tau: st.taus.iter().zip(&st.kappas).map(|(taus, kappa)| tau(taus, *kappa)).collect(),
     }
 }
 
-// Check 5 or 6 for one list, as one MSM of size N + 2m + 1:
+// Check 5 or 6 for one list, as one MSM of size (parts * N) + 2m + 1:
 //   sum_{k != m} e^k E_k + e^m Y - tau*g_ran - sum_i e^(m-1-i) <rows[i], a> == 0
-fn list_holds(g_ran: &RistrettoPoint, rows: &[Vec<RistrettoPoint>], y: &RistrettoPoint, es: &[RistrettoPoint], a: &[Scalar], tau: Scalar, ep: &[Scalar]) -> bool {
-    let m = rows.len();
+// where rows[i] = sum over the parts of weight * part[i].
+fn list_holds(g_ran: &RistrettoPoint, m: usize, list: &Checked, es: &[RistrettoPoint], a: &[Scalar], tau: Scalar, ep: &[Scalar]) -> bool {
     let mut scalars: Vec<Scalar> = (0..2 * m).filter(|&k| k != m).map(|k| ep[k]).collect();
     let mut points: Vec<RistrettoPoint> = es.to_vec();
     scalars.extend([ep[m], -tau]);
-    points.extend([*y, *g_ran]);
-    for (i, row) in rows.iter().enumerate() {
-        let w = ep[m - 1 - i];
-        scalars.extend(a.iter().map(|al| -(w * al)));
-        points.extend(row.iter().copied());
+    points.extend([list.y, *g_ran]);
+    for (rows, weight) in &list.parts {
+        for (i, row) in rows.iter().enumerate() {
+            let w = ep[m - 1 - i] * weight;
+            scalars.extend(a.iter().map(|al| -(w * al)));
+            points.extend(row.iter().copied());
+        }
     }
     RistrettoPoint::vartime_multiscalar_mul(scalars, points) == RistrettoPoint::identity()
 }
 
 // Steps 4-6.
-#[allow(clippy::too_many_arguments)]
 pub fn check(
     key: &ShuffleKey,
     g_ran: &RistrettoPoint,
-    c_rows: &[Vec<RistrettoPoint>],
-    d_rows: &[Vec<RistrettoPoint>],
+    lists: &[Checked],
     c_b: &[RistrettoPoint],
-    y_c: &RistrettoPoint,
-    y_d: &RistrettoPoint,
     first: &MultiExpFirst,
     resp: &MultiExpResponse,
     e: Scalar,
 ) -> bool {
-    let m = c_rows.len();
-    if m == 0 || d_rows.len() != m || c_b.len() != m || first.e_c.len() != 2 * m - 1 || first.e_d.len() != 2 * m - 1 {
+    let m = c_b.len();
+    if m == 0 || lists.is_empty() || first.e.len() != lists.len() || resp.tau.len() != lists.len() {
+        return false;
+    }
+    if first.e.iter().any(|es| es.len() != 2 * m - 1) {
         return false;
     }
     let n = resp.a.len();
-    if key.g.len() < n || c_rows.iter().chain(d_rows).any(|row| row.len() != n) {
+    let rows = lists.iter().flat_map(|l| &l.parts).flat_map(|(rows, _)| rows.iter());
+    if key.g.len() < n || lists.iter().flat_map(|l| &l.parts).any(|(rows, _)| rows.len() != m) || rows.clone().any(|row| row.len() != n) {
         return false;
     }
     let ep = powers(e, 2 * m);
@@ -175,9 +260,8 @@ pub fn check(
         return false;
     }
 
-    // 5 and 6.
-    list_holds(g_ran, c_rows, y_c, &first.e_c, &resp.a, resp.tau_c, &ep)
-        && list_holds(g_ran, d_rows, y_d, &first.e_d, &resp.a, resp.tau_d, &ep)
+    // 5 and 6, one per list.
+    lists.iter().zip(&first.e).zip(&resp.tau).all(|((list, es), tau)| list_holds(g_ran, m, list, es, &resp.a, *tau, &ep))
 }
 
 #[cfg(test)]
@@ -238,15 +322,53 @@ mod tests {
         Instance { key, g_ran: pp.g_ran, c_out, d_out, b, s_b, c_b, y_c, y_d, kappa_c, kappa_d, grid }
     }
 
+    // Two lists, C and D, as before level B2.
     fn prove(inst: &Instance, e: Scalar) -> (MultiExpFirst, MultiExpResponse) {
         let (cr, dr, br) = (inst.grid.rows(&inst.c_out), inst.grid.rows(&inst.d_out), inst.grid.rows(&inst.b));
-        let (first, st) = commit(&inst.key, &inst.g_ran, &cr, &dr, &br, &inst.s_b, inst.kappa_c, inst.kappa_d);
+        let (first, st) = commit(&inst.key, &inst.g_ran, &[(&cr[..], inst.kappa_c), (&dr[..], inst.kappa_d)], &br, &inst.s_b, Level::LATEST);
         (first, respond(st, e))
     }
 
     fn holds(inst: &Instance, first: &MultiExpFirst, resp: &MultiExpResponse, e: Scalar) -> bool {
         let (cr, dr) = (inst.grid.rows(&inst.c_out), inst.grid.rows(&inst.d_out));
-        check(&inst.key, &inst.g_ran, &cr, &dr, &inst.c_b, &inst.y_c, &inst.y_d, first, resp, e)
+        let lists = [Checked { parts: vec![(&cr[..], Scalar::ONE)], y: inst.y_c }, Checked { parts: vec![(&dr[..], Scalar::ONE)], y: inst.y_d }];
+        check(&inst.key, &inst.g_ran, &lists, &inst.c_b, first, resp, e)
+    }
+
+    // One list W = C + lambda*D, as from level B2: proved on W's points, checked from
+    // C and D with lambda folded into the scalars.
+    fn prove_combined(inst: &Instance, lambda: Scalar, e: Scalar) -> (MultiExpFirst, MultiExpResponse) {
+        let w: Vec<RistrettoPoint> = inst.c_out.iter().zip(&inst.d_out).map(|(c, d)| c + lambda * d).collect();
+        let (wr, br) = (inst.grid.rows(&w), inst.grid.rows(&inst.b));
+        let kappa = inst.kappa_c + lambda * inst.kappa_d;
+        let (first, st) = commit(&inst.key, &inst.g_ran, &[(&wr[..], kappa)], &br, &inst.s_b, Level::LATEST);
+        (first, respond(st, e))
+    }
+
+    fn holds_combined(inst: &Instance, lambda: Scalar, first: &MultiExpFirst, resp: &MultiExpResponse, e: Scalar) -> bool {
+        let (cr, dr) = (inst.grid.rows(&inst.c_out), inst.grid.rows(&inst.d_out));
+        let lists = [Checked { parts: vec![(&cr[..], Scalar::ONE), (&dr[..], lambda)], y: inst.y_c + lambda * inst.y_d }];
+        check(&inst.key, &inst.g_ran, &lists, &inst.c_b, first, resp, e)
+    }
+
+    #[test]
+    fn one_combined_list_verifies_and_still_ties_the_dates() {
+        for (m, n) in [(1, 4), (2, 3), (4, 5), (16, 8)] {
+            let inst = instance(m, n);
+            let (lambda, e) = (random_blinding(), random_blinding());
+            let (first, resp) = prove_combined(&inst, lambda, e);
+            assert!(holds_combined(&inst, lambda, &first, &resp, e), "m = {m}, n = {n}");
+            assert!(!holds_combined(&inst, random_blinding(), &first, &resp, e), "another lambda");
+        }
+        // Dates shuffled with another permutation than the amounts: W is no longer a
+        // shuffle of C_in + lambda*D_in with one b, so the single check fails.
+        let mut inst = instance(4, 5);
+        let other = random_perm(inst.d_out.len());
+        let d = inst.d_out.clone();
+        inst.d_out = other.iter().map(|&p| d[p]).collect();
+        let (lambda, e) = (random_blinding(), random_blinding());
+        let (first, resp) = prove_combined(&inst, lambda, e);
+        assert!(!holds_combined(&inst, lambda, &first, &resp, e));
     }
 
     #[test]
@@ -303,7 +425,7 @@ mod tests {
         assert!(!holds(&inst, &first, &resp, random_blinding()));
 
         let mut bad = first.clone();
-        bad.e_d[2] += inst.g_ran;
+        bad.e[1][2] += inst.g_ran;
         assert!(!holds(&inst, &bad, &resp, e));
     }
 
@@ -313,7 +435,7 @@ mod tests {
         let e = random_blinding();
         let (first, mut resp) = prove(&inst, e);
         let mut short = first.clone();
-        short.e_c.pop();
+        short.e[0].pop();
         assert!(!holds(&inst, &short, &resp, e));
         resp.a.pop();
         assert!(!holds(&inst, &first, &resp, e));
@@ -321,12 +443,31 @@ mod tests {
 
     #[test]
     fn sizes_are_4m_minus_1_points_and_n_plus_3_scalars() {
-        // One mask shared by both lists; separate diagonals and tau per list.
+        // One mask shared by both lists; separate diagonals and tau per list. With one
+        // combined list (B2): 2m points and n + 2 scalars.
         let inst = instance(16, 8);
         let e = random_blinding();
         let (first, resp) = prove(&inst, e);
         assert_eq!(first.size_bytes(), 32 * (4 * 16 - 1));
         assert_eq!(resp.size_bytes(), 32 * (8 + 3));
+        let (first, resp) = prove_combined(&inst, random_blinding(), e);
+        assert_eq!(first.size_bytes(), 32 * (2 * 16));
+        assert_eq!(resp.size_bytes(), 32 * (8 + 2));
+    }
+
+    #[test]
+    fn karatsuba_gives_every_diagonal_of_the_table() {
+        // Odd and even m, powers of two and not, and the small m where it is unused.
+        let g = curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+        for (m, n) in [(1, 3), (2, 2), (3, 4), (4, 2), (5, 3), (7, 2), (8, 1), (15, 2), (16, 3), (17, 2)] {
+            let rows: Vec<Vec<RistrettoPoint>> = (0..m).map(|_| (0..n).map(|_| random_blinding() * g).collect()).collect();
+            let a: Vec<Vec<Scalar>> = (0..=m).map(|_| (0..n).map(|_| random_blinding()).collect()).collect();
+            let fast = diagonals_karatsuba(&rows, &a);
+            assert_eq!(fast.len(), 2 * m);
+            for (k, d) in fast.iter().enumerate() {
+                assert_eq!(*d, diagonal(&rows, &a, k), "m = {m}, n = {n}, k = {k}");
+            }
+        }
     }
 
     #[test]

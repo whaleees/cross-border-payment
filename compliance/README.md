@@ -60,6 +60,7 @@ src/
 tests/story.rs     Singapore, Japan, Thailand, Singapore, and a year later
 benches/           components.rs (one proof at a time), scaling.rs (by N and m)
 examples/          breakdown.rs: where one round's time goes, step by step
+                   compare.rs: every optimisation level side by side (src/level.rs)
 ```
 
 ## Running it
@@ -73,6 +74,11 @@ cargo bench --features vartime-prover --bench scaling -- shuffle
                                              # the shuffle with a variable-time prover
 cargo run --release --example breakdown -- 1000
                                              # one round at N = 1,000, step by step
+cargo run --release --example compare -- 1000 10
+                                             # one round at every optimisation
+                                             # level, ending in a comparison table;
+                                             # the history is saved under target/
+                                             # and reused (--fresh rebuilds it)
 ```
 
 The prover's multi-scalar multiplications run in constant time by default, because

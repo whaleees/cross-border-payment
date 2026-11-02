@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use compliance::ctx::{BOTH, DATE, Round, STAGE_MIDEQ, STAGE_NEW_PAIR, STAGE_SHUFFLE, STAGE_TOTAL, VALUE};
 use compliance::hash::compress;
+use compliance::level::Level;
 use compliance::operator::{Entry, NullifierSet, Operator};
 use compliance::package::{Package, Start, statement};
 use compliance::params::{Params, ShuffleKey};
@@ -142,7 +143,7 @@ fn main() {
         ("shuffle key (derive_generators)", best(|| ShuffleKey::new(&pp, grid.n))),
         ("shuffle verify", best(|| {
             let proof = pr.shuffle.as_ref().unwrap();
-            proof.verify(&key, &pp, grid, &c_in, &d_in, &d.c_out, &d.d_out, encoded, &round.ctx(STAGE_SHUFFLE, BOTH, 0))
+            proof.verify(&key, &pp, grid, &c_in, &d_in, &d.c_out, &d.d_out, encoded, &round.ctx(STAGE_SHUFFLE, BOTH, 0), Level::LATEST)
         })),
         ("amounts verify (Bulletproofs)", best(|| {
             verify_amounts(&range_key, &d.v_dom, &d.v_s, u64::MAX / 4, &pr.amounts, &round.ctx(STAGE_TOTAL, VALUE, 1))
@@ -195,10 +196,13 @@ fn main() {
         ("shuffle key (derive_generators)", best(|| ShuffleKey::new(&pp, grid.n))),
         ("shuffle prove, S1-S6", best(|| {
             let e = s_enc.each_ref().map(Vec::as_slice);
-            ShuffleProof::prove(&key, &pp, grid, &s_c_in, &s_d_in, &s_c_out, &s_d_out, e, &perm, delta, eta, b"ctx")
+            ShuffleProof::prove(&key, &pp, grid, &s_c_in, &s_d_in, &s_c_out, &s_d_out, e, &perm, delta, eta, b"ctx", Level::LATEST)
         })),
-        ("  of which S6's diagonals (both lists)", best(|| {
-            multiexp::commit(&key, &pp.g_ran, &c_rows, &d_rows, &b_rows, &s_b, Scalar::ONE, Scalar::ONE)
+        ("  of which S6, two lists (before B2)", best(|| {
+            multiexp::commit(&key, &pp.g_ran, &[(&c_rows[..], Scalar::ONE), (&d_rows[..], Scalar::ONE)], &b_rows, &s_b, Level::LATEST)
+        })),
+        ("  of which S6, one list W (B2)", best(|| {
+            multiexp::commit(&key, &pp.g_ran, &[(&c_rows[..], Scalar::ONE)], &b_rows, &s_b, Level::LATEST)
         })),
         ("amounts prove (Bulletproofs, 64 bit)", best(|| {
             let total = Opened { v: 1_000, blinding: Scalar::ONE };

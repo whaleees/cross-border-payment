@@ -9,6 +9,7 @@ use rand_core::{OsRng, RngCore};
 
 use crate::ctx::{BOTH, DATE, Round, STAGE_DOMESTIC, STAGE_EXPIRY, STAGE_MIDEQ, STAGE_NEW_PAIR, STAGE_SHUFFLE, STAGE_TAG, STAGE_TOTAL, VALUE};
 use crate::operator::{Entry, Insert, NullifierSet, Registry, SignedRegistry};
+use crate::level::{Level, mideq_old};
 use crate::package::{Package, Start, statement};
 use crate::params::{Params, ShuffleKey, window_start};
 use crate::range::{RangeKey, verify_amounts, verify_expired};
@@ -62,6 +63,7 @@ pub struct Verifier {
     kid: u32,
     sk: SigningKey,
     limit: u64,
+    level: Level,
     params: Params,
     registry: Registry,
     range_key: RangeKey,
@@ -84,12 +86,20 @@ impl Verifier {
             kid,
             sk,
             limit: me.limit,
+            level: Level::LATEST,
             params,
             registry: signed.registry.clone(),
             range_key: RangeKey::new(&params.pp, 4),
             open: HashMap::new(),
             pending: HashMap::new(),
         })
+    }
+
+    // Check rounds of an earlier level of decision 35 (examples/compare.rs). From B1
+    // on the level is part of the protocol: PayPay must answer at the same level.
+    pub fn with_level(mut self, level: Level) -> Self {
+        self.level = level;
+        self
     }
 
     // G3 steps 1-4. today is the verifier's own clock; the merchant supplied tid and v.
@@ -166,7 +176,8 @@ impl Verifier {
 
         // D: every old and domestic amount belongs to tid's owner; this payment is v, today.
         if let Some(proof) = &p.mideq {
-            let cs: Vec<Commitment> = [x.tid].into_iter().chain(d.c_old().iter().chain(&d.c_dom).copied()).collect();
+            let old = mideq_old(self.level, d.c_old());
+            let cs: Vec<Commitment> = [x.tid].into_iter().chain(old.iter().chain(&d.c_dom).copied()).collect();
             if !proof.verify(&pp, &cs, &round.ctx(STAGE_MIDEQ, VALUE, 0)) {
                 return Err(Rejection::BadMIDEq);
             }
@@ -199,7 +210,7 @@ impl Verifier {
                 let key = ShuffleKey::new(&pp, grid.n);
                 let (ec_in, ed_in) = enc.inputs();
                 let encoded = [&ec_in[..], &ed_in, &enc.c_out, &enc.d_out];
-                if !proof.verify(&key, &pp, grid, &c_in, &d_in, &d.c_out, &d.d_out, encoded, &round.ctx(STAGE_SHUFFLE, BOTH, 0)) {
+                if !proof.verify(&key, &pp, grid, &c_in, &d_in, &d.c_out, &d.d_out, encoded, &round.ctx(STAGE_SHUFFLE, BOTH, 0), self.level) {
                     return Err(Rejection::BadShuffle);
                 }
             }
@@ -313,6 +324,67 @@ mod tests {
         pay(&mut w, TH, 5_000, DAY + 2).unwrap();
         assert_eq!(w.paypay.list(ANDI).len(), 3);
         assert_eq!(w.op.ns.len(), 2); // Andi's tag, then the first token's nullifier
+    }
+
+    #[test]
+    fn every_level_of_decision_35_is_approved() {
+        // The levels examples/compare.rs times must all be correct rounds.
+        for level in Level::ALL {
+            let mut w = at_level(level);
+            pay(&mut w, SG, 3_200, DAY).unwrap();
+            for t in 0..5 {
+                w.paypay.record_domestic(ANDI, 100, DAY + t);
+            }
+            pay(&mut w, TH, 5_000, DAY + 5).unwrap(); // N = 7, grid 2 x 4
+            pay(&mut w, SG, 1_000, DAY + 6).unwrap(); // 7 old records: B1 checks one
+            assert_eq!(w.paypay.list(ANDI).len(), 8, "{level:?}");
+        }
+    }
+
+    fn at_level(level: Level) -> World {
+        let mut w = world();
+        w.paypay = w.paypay.with_level(level);
+        w.sg = w.sg.with_level(level);
+        w.th = w.th.with_level(level);
+        w
+    }
+
+    #[test]
+    fn from_b1_on_both_sides_must_use_the_same_level() {
+        // B1 changes what Pi.MIDEq covers, so its proof does not fit the old check,
+        // and the other way round. Implementation levels (A1-A3) still mix freely.
+        for (prover, verifier, ok) in [(Level::B1, Level::A3, false), (Level::A3, Level::B1, false), (Level::A1, Level::A3, true)] {
+            let mut w = at_level(prover);
+            w.th = w.th.with_level(verifier);
+            pay(&mut w, SG, 3_200, DAY).unwrap();
+            pay(&mut w, SG, 1_000, DAY + 1).unwrap();
+            let third = pay(&mut w, TH, 1_000, DAY + 2);
+            assert_eq!(third.is_ok(), ok, "PayPay at {prover:?}, verifier at {verifier:?}");
+            if !ok {
+                assert_eq!(third.err(), Some(Rejection::BadMIDEq));
+            }
+        }
+    }
+
+    #[test]
+    fn at_b1_a_foreign_record_in_the_list_is_still_caught_by_the_token() {
+        // Pi.MIDEq no longer looks at the second old record, so swap that one for a
+        // stranger's commitment. The state token signed the real list: rejected.
+        let mut w = at_level(Level::B1);
+        pay(&mut w, SG, 3_200, DAY).unwrap();
+        pay(&mut w, SG, 1_000, DAY + 1).unwrap();
+        let mut copy = w.paypay.clone();
+        let req = w.th.ask(copy.issue_tid(ANDI), 1_000, DAY + 2);
+        let mut pkg = copy.respond(&req, DAY + 2).unwrap();
+        if let Start::Token { c_old, .. } = &mut pkg.data.start {
+            assert!(c_old.len() >= 2);
+            c_old[1] = ibc::commitment::commit(&w.th.params.pp, &ibc::commitment::Opening {
+                id: ibc::params::hash_identity(b"someone else"),
+                val: value_to_scalar(1),
+                blinding: Scalar::ONE,
+            });
+        }
+        assert_eq!(w.th.decide(&mut w.op.ns, &req.x.round_id, &pkg).err(), Some(Rejection::BadToken));
     }
 
     #[test]
