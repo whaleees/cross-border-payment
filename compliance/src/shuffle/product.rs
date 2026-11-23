@@ -18,18 +18,21 @@ use crate::params::ShuffleKey;
 //   respond       -> ProductResponse (move 9, after e)
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProductFirst {
     pub c_p: Option<RistrettoPoint>,  // None when m = 1
     pub c_q_mid: Vec<RistrettoPoint>, // S3's middle running products, m - 2 of them
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProductSecond {
     pub zero: Option<ZeroFirst>, // S3's zero argument, None when m = 1
     pub svp: SvpFirst,
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProductResponse {
     pub zero: Option<ZeroResponse>,
     pub svp: SvpResponse,

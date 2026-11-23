@@ -5,6 +5,7 @@ use crate::hash::Fingerprint;
 
 // x = (tid, v, t_now, T, B, round_id, kid): the verifier's request (G3 step 3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Request {
     pub tid: Commitment,
     pub v: u64,        // amount of this payment, SGD cents
@@ -44,6 +45,7 @@ impl Request {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SignedRequest {
     pub x: Request,
     pub sig: Signature,

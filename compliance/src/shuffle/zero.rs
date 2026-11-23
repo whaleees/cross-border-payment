@@ -26,6 +26,7 @@ pub fn phi(y: Scalar, u: &[Scalar], w: &[Scalar]) -> Scalar {
 
 // Sent before e.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZeroFirst {
     pub c_a0: RistrettoPoint,
     pub c_bm: RistrettoPoint,
@@ -34,6 +35,7 @@ pub struct ZeroFirst {
 
 // Sent after e.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZeroResponse {
     pub a: Vec<Scalar>, // sum_i e^i * a_i
     pub b: Vec<Scalar>, // sum_j e^(m-j) * b_j

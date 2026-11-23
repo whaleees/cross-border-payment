@@ -11,6 +11,7 @@ use crate::hash::Fingerprint;
 // A token proves the list is complete and current only together with the nullifier
 // set: the list is the one a verifier approved, and no newer token replaced it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StateToken {
     pub kid: u32,      // which verifier signed, looked up in the operator's registry
     pub cm: [u8; 32],  // nullifier commitment

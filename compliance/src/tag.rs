@@ -14,6 +14,7 @@ use crate::params::Params;
 // Written by hand like Pi.TxVer: Kresna's sigma engine proves one equation, and
 // folding the two clauses into one before t is fixed lets a tag carry an extra
 // g_ran term (single_equation_shortcut_accepts_a_forged_tag).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TagProof {
     pub t1: RistrettoPoint,
     pub t2: RistrettoPoint,

@@ -10,6 +10,7 @@ use crate::params::PERIOD_DAYS;
 // One entry of the nullifier set. The kind is part of the key, so a registration
 // tag can never be mistaken for a nullifier, or the other way round.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Entry {
     Nullifier([u8; 32]), // nf = H("nf", rho) of a spent state token
     Tag([u8; 32]),       // a registered user's tag, compressed
@@ -61,6 +62,7 @@ impl NullifierSet {
 // One verifier as the operator lists it: its key number, its public key, and its
 // limit B in SGD cents (decision 19c).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VerifierEntry {
     pub kid: u32,
     pub pk: VerifyingKey,
@@ -69,6 +71,7 @@ pub struct VerifierEntry {
 
 // The registry the prover checks every request against: T and every verifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Registry {
     pub period_days: u32,
     pub verifiers: Vec<VerifierEntry>,
@@ -92,6 +95,7 @@ impl Registry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SignedRegistry {
     pub registry: Registry,
     pub sig: Signature,

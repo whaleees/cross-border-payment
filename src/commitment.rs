@@ -14,6 +14,7 @@ pub struct Opening {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Commitment(pub RistrettoPoint);
 
 // Sample a fresh blinding factor 

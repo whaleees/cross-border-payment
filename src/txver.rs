@@ -8,6 +8,7 @@ use crate::commitment::{Commitment, Opening};
 use crate::params::PublicParams;
 use crate::transcript::Challenge;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TxVerProof {
     pub t1: RistrettoPoint,
     pub t2: RistrettoPoint,

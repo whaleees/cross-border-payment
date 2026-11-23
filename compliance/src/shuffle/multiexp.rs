@@ -22,12 +22,14 @@ use crate::params::ShuffleKey;
 // (i, j) sits on diagonal k = m - 1 + j - i, k = 0..2m-1, main diagonal k = m.
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiExpFirst {
     pub c_a0: RistrettoPoint,
     pub e: Vec<Vec<RistrettoPoint>>, // per list: E_k for k = 0..2m-1, skipping k = m
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiExpResponse {
     pub a: Vec<Scalar>, // sum_j e^j * A_j, shared by every list
     pub r: Scalar,

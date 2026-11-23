@@ -72,6 +72,21 @@ pub struct Verifier {
 }
 
 impl Verifier {
+    // The application persists this prepared token before the remote operator's
+    // atomic insertion. It must not release it until insertion ownership is confirmed.
+    #[cfg(feature = "serde")]
+    pub fn prepare(&self, approved: &Approved) -> (Entry, StateToken) {
+        (approved.entry, StateToken::issue(&self.sk, self.kid, &approved.front_c, &approved.front_d, approved.cm_next))
+    }
+
+    #[cfg(feature = "serde")]
+    pub fn restore_request(&mut self, request: &SignedRequest) -> bool {
+        if request.x.kid != self.kid || !request.verify(&self.sk.verifying_key()) {
+            return false;
+        }
+        self.open.insert(request.x.round_id, request.x);
+        true
+    }
     // G0 step 12, plus a sanity check that the registry lists this verifier as itself.
     pub fn new(kid: u32, sk: SigningKey, signed: &SignedRegistry, operator_pk: &VerifyingKey) -> Option<Self> {
         if !signed.verify(operator_pk) {

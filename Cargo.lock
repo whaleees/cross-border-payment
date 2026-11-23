@@ -213,6 +213,7 @@ dependencies = [
  "fiat-crypto",
  "rand_core",
  "rustc_version",
+ "serde",
  "subtle",
  "zeroize",
 ]
@@ -320,6 +321,7 @@ dependencies = [
  "curve25519-dalek",
  "merlin",
  "rand_core",
+ "serde",
  "sha2",
 ]
 

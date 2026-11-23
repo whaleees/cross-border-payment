@@ -22,6 +22,7 @@ use crate::params::ShuffleKey;
 // the round's ctx and the whole statement (decision 24). The caller passes the four
 // lists also compressed, in the order c_in, d_in, c_out, d_out: in a round it has
 // those bytes already, from stmt (decision 34).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ShuffleProof {
     pub c_a: Vec<RistrettoPoint>, // move 1: the permutation, one commitment per row
     pub c_b: Vec<RistrettoPoint>, // move 3: x^(position), one commitment per row

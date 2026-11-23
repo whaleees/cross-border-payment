@@ -8,6 +8,7 @@ use crate::params::PublicParams;
 use crate::transcript::Challenge;
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SigmaProof {
     pub t: RistrettoPoint,
     pub z: Vec<Scalar>,

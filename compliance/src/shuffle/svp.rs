@@ -11,6 +11,7 @@ use crate::params::ShuffleKey;
 
 // Sent before the challenge e.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SvpFirst {
     pub c_d: RistrettoPoint,     // masks for a
     pub c_delta: RistrettoPoint, // the e^0 leftover of each running-product step
@@ -19,6 +20,7 @@ pub struct SvpFirst {
 
 // Sent after e.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SvpResponse {
     pub a_tilde: Vec<Scalar>, // e*a + d
     pub b_tilde: Vec<Scalar>, // e*q + delta

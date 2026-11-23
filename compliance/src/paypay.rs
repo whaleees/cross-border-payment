@@ -30,6 +30,7 @@ pub type User = u64;
 
 // One transaction pair (c, d) and its opening.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Record {
     pub c: Commitment,
     pub d: Commitment,
@@ -54,6 +55,7 @@ pub struct SavedAccount {
 }
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Account {
     id: Scalar,
     list: Vec<Record>,                     // last front, in the signed order
@@ -64,6 +66,7 @@ struct Account {
 }
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Tid {
     user: User,
     s: Scalar,
@@ -72,6 +75,7 @@ struct Tid {
 
 // Kept from sending Phi until the verifier's token arrives.
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Pending {
     user: User,
     kid: u32,
@@ -80,7 +84,7 @@ struct Pending {
     front_d: Vec<CompressedRistretto>,
     rho_next: [u8; 32],
     cm_next: [u8; 32],
-    domestic_used: usize,
+    domestic_ids: Vec<[u8; 32]>,
 }
 
 // Why a request got no package. The verifier is only told "refused" (G3, G4).
@@ -403,7 +407,7 @@ impl PayPay {
                 front_d: front_d.to_vec(),
                 rho_next,
                 cm_next,
-                domestic_used: domestic.len(),
+                domestic_ids: domestic.iter().map(|record| record.c.to_bytes()).collect(),
             },
         );
 
@@ -427,8 +431,55 @@ impl PayPay {
         acct.list = p.front; // the tail is dropped here
         (acct.list_c, acct.list_d) = (p.front_c, p.front_d);
         acct.token = Some((token, p.rho_next));
-        acct.domestic.drain(..p.domestic_used);
+        acct.domestic.retain(|record| !p.domestic_ids.contains(&record.c.to_bytes()));
         true
+    }
+}
+
+// Application persistence excludes derived generator tables and range-proof keys.
+// They are reconstructed from the authenticated registry on restore.
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct WalletSnapshot {
+    k_p: [u8; 32],
+    level: Level,
+    accounts: HashMap<User, Account>,
+    tids: HashMap<[u8; 32], Tid>,
+    pending: HashMap<[u8; 32], Pending>,
+}
+
+#[cfg(feature = "serde")]
+impl PayPay {
+    pub fn snapshot(&self) -> WalletSnapshot {
+        WalletSnapshot {
+            k_p: self.k_p,
+            level: self.level,
+            accounts: self.accounts.clone(),
+            tids: self.tids.clone(),
+            pending: self.pending.clone(),
+        }
+    }
+
+    pub fn restore(snapshot: WalletSnapshot, signed: &SignedRegistry, operator_pk: &VerifyingKey) -> Option<Self> {
+        let mut wallet = Self::new(signed, operator_pk)?;
+        wallet.k_p = snapshot.k_p;
+        wallet.level = snapshot.level;
+        wallet.accounts = snapshot.accounts;
+        wallet.tids = snapshot.tids;
+        wallet.pending = snapshot.pending;
+        Some(wallet)
+    }
+
+    pub fn user_for_tid(&self, tid: &Commitment) -> Option<User> {
+        self.tids.get(&tid.to_bytes()).map(|entry| entry.user)
+    }
+
+    pub fn domestic(&self, user: User) -> &[Record] {
+        &self.accounts[&user].domestic
+    }
+
+    pub fn discard_pending(&mut self, round_id: &[u8; 32]) {
+        self.pending.remove(round_id);
     }
 }
 
@@ -460,6 +511,34 @@ mod tests {
         let mut paypay = PayPay::new(&op.publish(), &op.public_key()).unwrap();
         paypay.register(ANDI, b"Andi, passport TR0001234");
         World { sg, th, paypay }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn restored_pending_round_keeps_its_identity_and_only_removes_its_domestic_records() {
+        let mut w = world();
+        w.paypay.record_domestic(ANDI, 1_000, TODAY);
+        let tid = w.paypay.issue_tid(ANDI);
+        let req = ask(tid, 2_000, TODAY, SG, SG_LIMIT, &w.sg);
+        let package = w.paypay.respond(&req, TODAY).unwrap();
+        let provider_key = w.paypay.k_p;
+        let identity = w.paypay.accounts[&ANDI].id;
+
+        let mut operator = Operator::new();
+        operator.register(SG, w.sg.verifying_key(), SG_LIMIT);
+        operator.register(TH, w.th.verifying_key(), TH_LIMIT);
+        w.paypay = PayPay::restore(w.paypay.snapshot(), &operator.publish(), &operator.public_key()).unwrap();
+
+        assert_eq!(w.paypay.k_p, provider_key);
+        assert_eq!(w.paypay.accounts[&ANDI].id, identity);
+        assert_eq!(w.paypay.user_for_tid(&tid), Some(ANDI));
+        assert!(w.paypay.tids[&tid.to_bytes()].used);
+        w.paypay.record_domestic(ANDI, 3_000, TODAY);
+        assert!(approve(&mut w, &req, &package));
+        assert_eq!(w.paypay.domestic(ANDI).len(), 1);
+        assert_eq!(w.paypay.domestic(ANDI)[0].v, 3_000);
+        assert_eq!(w.paypay.list(ANDI).len(), 2);
+        assert!(w.paypay.pending.is_empty());
     }
 
     fn round_id() -> [u8; 32] {

@@ -3,6 +3,7 @@ use crate::params::PublicParams;
 use crate::sigma::{self, SigmaProof};
 use crate::transcript::Challenge;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VEqProof(pub SigmaProof);
 
 const DS: &[u8] = b"IBC/v1/VEq";

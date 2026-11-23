@@ -3,6 +3,7 @@
 // in the code, so examples/compare.rs can time them side by side in one run. From B1
 // on a level changes the protocol, and then prover and verifier must use the same one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Level {
     Baseline, // before decision 35
     A1,       // Karatsuba for S6's diagonals

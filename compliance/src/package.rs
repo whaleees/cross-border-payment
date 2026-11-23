@@ -17,6 +17,7 @@ use crate::tag::TagProof;
 // stmt, so the data must be complete before the first proof is made.
 
 // What the history starts from.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Start {
     // Every payment after the first: the last state token, the rho that opens its cm,
     // and the list it signed (in the signed order).
@@ -25,6 +26,7 @@ pub enum Start {
     First { tag: RistrettoPoint },
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RoundData {
     pub start: Start,
     pub cm_next: [u8; 32], // cm' for the token this round will issue
@@ -39,6 +41,7 @@ pub struct RoundData {
     pub v_s: Commitment, // two-basis commitment to the front total S
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Proofs {
     pub tag: Option<TagProof>,        // first payment only
     pub mideq: Option<MIDEqProof>,    // when there is an old list or domestic records
@@ -51,6 +54,7 @@ pub struct Proofs {
     pub amounts: RangeProof,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Package {
     pub data: RoundData,
     pub proofs: Proofs,
